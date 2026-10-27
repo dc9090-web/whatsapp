@@ -9,10 +9,26 @@ license.workspace = true
 name = "whatsapp-cosmic"
 path = "src/main.rs"
 
+[features]
+# Desktop integration (tray, notifications, autostart) via `wa-desktop`.
+default = ["desktop"]
+desktop = []
+
 [dependencies]
 wa-core.workspace = true
 wa-desktop.workspace = true
 anyhow.workspace = true
+serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 libcosmic.workspace = true
+qrcode = { version = "0.14", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
+ogg = "0.9"
+opus = "0.4"
+open = "5"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+tempfile = "3"
