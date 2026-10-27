@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.github.whatsapp-cosmic</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>WhatsApp for COSMIC</name>
+  <summary>Unofficial native WhatsApp client for the COSMIC desktop</summary>
+  <description>
+    <p>
+      A native Rust client built with libcosmic. It links to your phone as a
+      WhatsApp linked device by scanning a QR code, and supports chats and
+      groups, replies, reactions, images, stickers, voice notes, documents,
+      desktop notifications and a tray icon with an unread badge.
+    </p>
+    <p>
+      This is an unofficial client and is not affiliated with or endorsed by
+      WhatsApp or Meta. Using unofficial clients may violate the WhatsApp
+      Terms of Service and could lead to your account being banned.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.github.whatsapp-cosmic.desktop</launchable>
+  <provides>
+    <binary>whatsapp-cosmic</binary>
+  </provides>
+  <categories>
+    <category>Network</category>
+    <category>InstantMessaging</category>
+  </categories>
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+    <content_attribute id="social-audio">moderate</content_attribute>
+  </content_rating>
+  <releases>
+    <release version="0.1.0" date="2026-10-27"/>
+  </releases>
+</component>

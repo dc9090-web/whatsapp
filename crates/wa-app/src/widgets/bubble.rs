@@ -267,9 +267,12 @@ fn quote_block<'a>(
     container(
         widget::row::with_capacity(2)
             .spacing(space.space_xs)
-            .height(Length::Shrink)
             .push(bar)
-            .push(text),
+            .push(text)
+            // Must come after the pushes: `push` widens the size to the
+            // children's (the bar fills), which would make the whole bubble
+            // fill-height and collapse inside the scrollable.
+            .height(Length::Shrink),
     )
     .padding([space.space_xxs, space.space_xs])
     .class(theme::Container::custom(move |theme| {

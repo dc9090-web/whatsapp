@@ -265,6 +265,11 @@ impl App {
         {
             conv.chat = chat.clone();
         }
+        self.set_total_unread(total)
+    }
+
+    /// Updates the cached unread total and the tray badge when it changed.
+    fn set_total_unread(&mut self, total: u32) -> Task<Message> {
         let changed = total != self.total_unread;
         self.total_unread = total;
         match (&self.tray, changed) {
@@ -316,6 +321,21 @@ impl App {
                 .iter()
                 .find(|m| m.from_me && !m.sender.is_empty())
                 .map(|m| m.sender.clone());
+        }
+        // Stickers usually arrive without an inline thumbnail; they are small,
+        // so download them right away instead of showing a placeholder.
+        let stickers: Vec<MessageId> = conv
+            .messages
+            .iter()
+            .filter(|m| matches!(m.content, MessageContent::Sticker { .. }))
+            .filter(|m| !conv.thumbs.contains_key(&m.id))
+            .filter(|m| m.content.media().and_then(media::local_file).is_none())
+            .map(|m| m.id.clone())
+            .collect();
+        for id in stickers {
+            if !self.fetching.contains(&id) && !self.media_errors.contains_key(&id) {
+                self.request_media(&id);
+            }
         }
     }
 
@@ -401,13 +421,33 @@ impl App {
         }
         let chat = conv.chat.id.clone();
         if self.send(BackendCommand::MarkRead {
-            chat,
+            chat: chat.clone(),
             messages: ids,
-        }) && let Some(conv) = &mut self.conversation
+        }) {
+            return self.mark_read_locally(&chat);
+        }
+        Task::none()
+    }
+
+    /// Mirrors a sent `MarkRead` in the UI state right away. The runtime
+    /// updates the store asynchronously and emits no event for it, so a
+    /// reload right now could still see the old count.
+    fn mark_read_locally(&mut self, chat: &ChatId) -> Task<Message> {
+        if let Some(conv) = &mut self.conversation
+            && &conv.chat.id == chat
         {
             conv.chat.unread = 0;
         }
-        Task::none()
+        if let Some(c) = self.chats.iter_mut().find(|c| &c.id == chat) {
+            c.unread = 0;
+        }
+        let total = self
+            .chats
+            .iter()
+            .filter(|c| !c.muted)
+            .map(|c| c.unread)
+            .fold(0u32, u32::saturating_add);
+        self.set_total_unread(total)
     }
 
     fn find_message(&self, id: &MessageId) -> Option<&wa_core::Message> {
@@ -562,9 +602,8 @@ impl App {
                             chat: msg.chat.clone(),
                             messages: vec![msg.id.clone()],
                         })
-                        && let Some(conv) = &mut self.conversation
                     {
-                        conv.chat.unread = 0;
+                        tasks.push(self.mark_read_locally(&msg.chat));
                     }
                 }
                 tasks.push(self.maybe_notify(&msg));

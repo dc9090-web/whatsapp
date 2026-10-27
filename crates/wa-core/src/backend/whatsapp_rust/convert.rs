@@ -14,6 +14,7 @@ use whatsapp_rust::waproto::buffa::MessageField;
 use whatsapp_rust::waproto::codec;
 use whatsapp_rust::waproto::whatsapp as wa;
 
+use crate::backend::fake::OWN_REACTION_SENDER;
 use crate::model::{
     Chat, ChatId, ChatKind, MediaRef, Message, MessageContent, MessageId, MessageStatus,
     QuotedMessage, Reaction,
@@ -148,7 +149,13 @@ pub fn convert_message(meta: MsgMeta, msg: &wa::Message) -> Converted {
         return Converted::Reaction(Reaction {
             chat: meta.chat,
             target: MessageId(target),
-            sender: meta.sender,
+            // Our own reactions use the shared "me" convention (see FakeBackend)
+            // so the UI can highlight them without knowing our JID.
+            sender: if meta.from_me {
+                OWN_REACTION_SENDER.to_owned()
+            } else {
+                meta.sender
+            },
             emoji: r.text.clone().unwrap_or_default(),
             timestamp: r.sender_timestamp_ms.unwrap_or(meta.timestamp),
         });
@@ -819,7 +826,7 @@ pub fn convert_history(
                     continue;
                 };
                 let sender = if rk.from_me.unwrap_or(false) {
-                    own_jid.to_owned()
+                    OWN_REACTION_SENDER.to_owned()
                 } else {
                     rk.participant
                         .as_deref()
@@ -1089,6 +1096,33 @@ mod tests {
         };
         assert_eq!(r.emoji, "");
         assert_eq!(r.timestamp, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn own_reaction_uses_me_sender() {
+        let msg = wa::Message {
+            reaction_message: MessageField::some(wa::message::ReactionMessage {
+                key: MessageField::some(wa::MessageKey {
+                    id: Some("T".into()),
+                    ..Default::default()
+                }),
+                text: Some("👍".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let own = MsgMeta {
+            from_me: true,
+            ..meta("1@s.whatsapp.net")
+        };
+        let Converted::Reaction(r) = convert_message(own, &msg) else {
+            panic!("expected reaction");
+        };
+        assert_eq!(r.sender, OWN_REACTION_SENDER);
+        let Converted::Reaction(r) = convert_message(meta("1@s.whatsapp.net"), &msg) else {
+            panic!("expected reaction");
+        };
+        assert_eq!(r.sender, "15550001111@s.whatsapp.net");
     }
 
     #[test]

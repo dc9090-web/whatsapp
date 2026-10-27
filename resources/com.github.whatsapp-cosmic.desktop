@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=WhatsApp for COSMIC
+GenericName=Messenger
+Comment=Unofficial native WhatsApp client for the COSMIC desktop
+Exec=whatsapp-cosmic
+Icon=com.github.whatsapp-cosmic
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+Keywords=WhatsApp;chat;messenger;message;
+StartupNotify=true
+StartupWMClass=com.github.whatsapp-cosmic
+SingleMainWindow=true

@@ -514,7 +514,7 @@ async fn handle_command(shared: &Arc<Shared>, client: &Arc<Client>, cmd: Backend
                     .emit(BackendEvent::Reaction(Reaction {
                         chat,
                         target,
-                        sender: own_jid(client),
+                        sender: crate::backend::fake::OWN_REACTION_SENDER.to_owned(),
                         emoji,
                         timestamp: now_ms(),
                     }))
