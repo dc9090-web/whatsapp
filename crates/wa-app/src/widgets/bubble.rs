@@ -16,13 +16,16 @@ use crate::app::Message;
 /// Bubble max width, in logical pixels.
 pub const MAX_BUBBLE_WIDTH: f32 = 520.0;
 
+/// Alpha of the accent colour behind outgoing bubbles.
+const OUTGOING_TINT: f32 = 0.34;
+
 /// Delivery glyph for the bubble footer (empty for incoming messages).
 pub fn status_glyph(status: MessageStatus) -> &'static str {
     match status {
-        MessageStatus::Pending => "🕓",
+        MessageStatus::Pending => "◷",
         MessageStatus::Sent => "✓",
         MessageStatus::Delivered | MessageStatus::Read => "✓✓",
-        MessageStatus::Failed => "⚠",
+        MessageStatus::Failed => "!",
         MessageStatus::Received => "",
     }
 }
@@ -139,14 +142,15 @@ pub fn view<'a>(msg: &'a wa_core::Message, ctx: BubbleCtx<'a>) -> Element<'a, Me
         widget::row::with_capacity(2)
             .spacing(space.space_xxxs)
             .push(with_tooltip(
-                button::icon(icon::from_name("mail-reply-sender-symbolic"))
+                button::icon(super::reply_icon())
                     .extra_small()
                     .on_press(Message::StartReply(msg.id.clone())),
                 "Reply",
             ))
             .push(with_tooltip(
-                button::icon(icon::from_name("face-smile-symbolic"))
-                    .extra_small()
+                button::custom(widget::text("😊").size(15))
+                    .padding([space.space_xxxs, space.space_xxs])
+                    .class(theme::Button::Icon)
                     .on_press(Message::OpenMessageMenu(msg.id.clone())),
                 "React",
             ))
@@ -212,11 +216,7 @@ pub fn view<'a>(msg: &'a wa_core::Message, ctx: BubbleCtx<'a>) -> Element<'a, Me
 
 fn footer<'a>(msg: &'a wa_core::Message, time: &str, outgoing: bool) -> Element<'a, Message> {
     let space = theme::spacing();
-    let time = widget::text::caption(time.to_owned()).class(if outgoing {
-        theme::Text::Custom(on_accent_dim)
-    } else {
-        theme::Text::Custom(super::dim_text)
-    });
+    let time = widget::text::caption(time.to_owned()).class(theme::Text::Custom(super::dim_text));
     let mut row = widget::row::with_capacity(3)
         .spacing(space.space_xxs)
         .align_y(Alignment::Center)
@@ -225,12 +225,12 @@ fn footer<'a>(msg: &'a wa_core::Message, time: &str, outgoing: bool) -> Element<
         let glyph = status_glyph(msg.status);
         if !glyph.is_empty() {
             let class = match msg.status {
-                MessageStatus::Read => theme::Text::Custom(read_ticks),
+                MessageStatus::Read => theme::Text::Custom(super::accent_text),
                 MessageStatus::Failed => theme::Text::Custom(destructive_text),
-                _ => theme::Text::Custom(on_accent_dim),
+                _ => theme::Text::Custom(super::dim_text),
             };
             let mut text = widget::text::caption(glyph).class(class);
-            if msg.status == MessageStatus::Read {
+            if matches!(msg.status, MessageStatus::Read | MessageStatus::Failed) {
                 text = text.font(cosmic::font::bold());
             }
             row = row.push(text);
@@ -252,11 +252,8 @@ fn quote_block<'a>(
     )
     .class(theme::Container::custom(move |theme| {
         let cosmic = theme.cosmic();
-        let color: Color = if outgoing {
-            cosmic.on_accent_color().into()
-        } else {
-            cosmic.accent_color().into()
-        };
+        let _ = outgoing;
+        let color: Color = cosmic.accent_color().into();
         container::Style {
             background: Some(Background::Color(color)),
             border: Border {
@@ -284,13 +281,10 @@ fn quote_block<'a>(
     .padding([space.space_xxs, space.space_xs])
     .class(theme::Container::custom(move |theme| {
         let cosmic = theme.cosmic();
-        let tint: Color = if outgoing {
-            Color::BLACK
-        } else {
-            cosmic.on_bg_color().into()
-        };
+        let _ = outgoing;
+        let tint: Color = cosmic.on_bg_color().into();
         container::Style {
-            background: Some(Background::Color(with_alpha(tint, 0.10))),
+            background: Some(Background::Color(with_alpha(tint, 0.08))),
             border: Border {
                 radius: cosmic.corner_radii.radius_s.into(),
                 ..Border::default()
@@ -318,12 +312,12 @@ fn context_menu<'a>(msg: &'a wa_core::Message) -> Element<'a, Message> {
         "More reactions",
     ));
 
-    let item = |label: &'static str, icon_name: &'static str, message: Message| {
+    let item = |label: &'static str, handle: icon::Handle, message: Message| {
         button::custom(
             widget::row::with_capacity(2)
                 .spacing(space.space_xs)
                 .align_y(Alignment::Center)
-                .push(icon::from_name(icon_name).size(16))
+                .push(icon::icon(handle).size(16))
                 .push(widget::text::body(label)),
         )
         .width(Length::Fill)
@@ -338,7 +332,7 @@ fn context_menu<'a>(msg: &'a wa_core::Message) -> Element<'a, Message> {
         .push(widget::divider::horizontal::light())
         .push(item(
             "Reply",
-            "mail-reply-sender-symbolic",
+            super::reply_icon(),
             Message::StartReply(msg.id.clone()),
         ));
     let copy = match &msg.content {
@@ -351,7 +345,7 @@ fn context_menu<'a>(msg: &'a wa_core::Message) -> Element<'a, Message> {
     if let Some(text) = copy {
         menu = menu.push(item(
             "Copy text",
-            "edit-copy-symbolic",
+            icon::from_name("edit-copy-symbolic").into(),
             Message::CopyText(text),
         ));
     }
@@ -398,10 +392,13 @@ fn bubble_class(outgoing: bool) -> theme::Container<'static> {
         } else {
             [big, big, big, small]
         };
+        // Outgoing: the accent tinted over the window background, so it
+        // reads as "ours" without a bright slab in dark mode. Text stays
+        // the normal foreground colour on both.
         let (bg, fg): (Color, Color) = if outgoing {
             (
-                cosmic.accent_color().into(),
-                cosmic.on_accent_color().into(),
+                with_alpha(cosmic.accent_color().into(), OUTGOING_TINT),
+                cosmic.on_bg_color().into(),
             )
         } else {
             (
@@ -442,17 +439,6 @@ fn with_tooltip<'a>(
     .into()
 }
 
-fn on_accent_dim(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
-    let on: Color = theme.cosmic().on_accent_color().into();
-    crate::widgets::text_style(with_alpha(on, 0.72))
-}
-
-/// Read ticks: full-strength (and bold) on the accent bubble so they stand out
-/// from the dimmed Sent/Delivered ticks.
-fn read_ticks(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
-    crate::widgets::text_style(theme.cosmic().on_accent_color().into())
-}
-
 fn destructive_text(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
     crate::widgets::text_style(theme.cosmic().destructive_text_color().into())
 }
@@ -463,11 +449,11 @@ mod tests {
 
     #[test]
     fn status_glyphs() {
-        assert_eq!(status_glyph(MessageStatus::Pending), "🕓");
+        assert_eq!(status_glyph(MessageStatus::Pending), "◷");
         assert_eq!(status_glyph(MessageStatus::Sent), "✓");
         assert_eq!(status_glyph(MessageStatus::Delivered), "✓✓");
         assert_eq!(status_glyph(MessageStatus::Read), "✓✓");
-        assert_eq!(status_glyph(MessageStatus::Failed), "⚠");
+        assert_eq!(status_glyph(MessageStatus::Failed), "!");
         assert_eq!(status_glyph(MessageStatus::Received), "");
     }
 }

@@ -8,6 +8,51 @@ use cosmic::iced::{Alignment, Background, Border, Color, Length};
 use cosmic::widget::{self, button, container};
 use cosmic::{Element, theme};
 
+/// Height of the chat-list and conversation headers, so their hairlines line up.
+pub const HEADER_HEIGHT: f32 = 60.0;
+
+/// WhatsApp green, used for the one primary action: sending.
+pub const SEND_GREEN: Color = Color::from_rgb(0.0, 0.66, 0.52);
+const SEND_GREEN_HOVER: Color = Color::from_rgb(0.02, 0.76, 0.60);
+
+/// Reply arrow. The Cosmic icon theme has no `mail-reply-sender-symbolic`,
+/// and the fallback theme's renders badly, so the icon is embedded.
+pub fn reply_icon() -> widget::icon::Handle {
+    const SVG: &[u8] = include_bytes!("../../assets/reply-symbolic.svg");
+    let mut handle = widget::icon::from_svg_bytes(SVG);
+    handle.symbolic = true;
+    handle
+}
+
+/// Round send button: green when there is something to send, else quiet.
+pub fn send_class(enabled: bool) -> theme::Button {
+    fn style(theme: &cosmic::Theme, enabled: bool, hovered: bool) -> button::Style {
+        let cosmic = theme.cosmic();
+        let mut style = button::Style::new();
+        style.border_radius = 999.0.into();
+        let (bg, fg): (Color, Color) = if !enabled {
+            (
+                cosmic.background(false).component.base.into(),
+                with_alpha(cosmic.on_bg_color().into(), 0.4),
+            )
+        } else if hovered {
+            (SEND_GREEN_HOVER, Color::WHITE)
+        } else {
+            (SEND_GREEN, Color::WHITE)
+        };
+        style.background = Some(Background::Color(bg));
+        style.icon_color = Some(fg);
+        style.text_color = Some(fg);
+        style
+    }
+    theme::Button::Custom {
+        active: Box::new(move |_, t| style(t, enabled, false)),
+        disabled: Box::new(move |t| style(t, false, false)),
+        hovered: Box::new(move |_, t| style(t, enabled, true)),
+        pressed: Box::new(move |_, t| style(t, enabled, false)),
+    }
+}
+
 /// The app logo, embedded so it shows even when the app is not installed.
 pub fn app_logo<'a, M: 'a>(size: u16) -> Element<'a, M> {
     const LOGO: &[u8] = include_bytes!(
@@ -125,9 +170,10 @@ pub fn list_row_class(selected: bool) -> theme::Button {
                 0.18,
             )))
         } else if hovered {
-            Some(Background::Color(
-                cosmic.background(false).component.hover.into(),
-            ))
+            Some(Background::Color(with_alpha(
+                cosmic.on_bg_color().into(),
+                0.06,
+            )))
         } else {
             None
         };

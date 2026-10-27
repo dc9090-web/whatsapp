@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use cosmic::app::{Core, Task, context_drawer};
 use cosmic::iced::widget::scrollable::RelativeOffset;
-use cosmic::iced::{Alignment, Length, Size, Subscription, window};
+use cosmic::iced::{Alignment, Background, Length, Size, Subscription, window};
 use cosmic::widget::{self, button, container, icon, popover};
 use cosmic::{Application, ApplicationExt, Element, cosmic_config, theme};
 use wa_core::{
@@ -988,18 +988,22 @@ impl Application for App {
         let space = theme::spacing();
         match self.dialog.as_ref()? {
             Dialog::EmojiPicker(target) => {
-                let mut grid = widget::column::with_capacity(ALL_EMOJIS.len() / 8 + 1).spacing(space.space_xxxs);
-                for chunk in ALL_EMOJIS.chunks(8) {
-                    let mut row = widget::row::with_capacity(8).spacing(space.space_xxxs);
+                const PER_ROW: usize = 9;
+                let mut grid = widget::column::with_capacity(ALL_EMOJIS.len() / PER_ROW + 1)
+                    .spacing(space.space_xxxs)
+                    .width(Length::Fill);
+                for chunk in ALL_EMOJIS.chunks(PER_ROW) {
+                    let mut row = widget::row::with_capacity(PER_ROW).spacing(space.space_xxxs);
                     for emoji in chunk {
                         row = row.push(
-                            button::custom(widget::text(*emoji).size(22))
-                                .padding(space.space_xxs)
+                            button::custom(widget::text(*emoji).size(24))
+                                .padding([space.space_xxs, space.space_xs])
                                 .class(theme::Button::Text)
                                 .on_press(Message::React(target.clone(), (*emoji).to_owned())),
                         );
                     }
-                    grid = grid.push(row);
+                    // Centred so a short last row does not hang on the left.
+                    grid = grid.push(container(row).width(Length::Fill).align_x(Alignment::Center));
                 }
                 Some(
                     widget::dialog()
@@ -1456,10 +1460,19 @@ impl App {
                 pages::chats::view(self)
             };
         }
+        // The chat list sits on its own (primary) surface; the window
+        // background shows through the conversation pane.
+        let sidebar = container(pages::chats::view(self))
+            .width(Length::Fixed(pages::chats::LIST_WIDTH))
+            .height(Length::Fill)
+            .class(theme::Container::custom(|theme| container::Style {
+                background: Some(Background::Color(
+                    theme.cosmic().primary_container_color().into(),
+                )),
+                ..container::Style::default()
+            }));
         widget::row::with_capacity(3)
-            .push(
-                container(pages::chats::view(self)).width(Length::Fixed(pages::chats::LIST_WIDTH)),
-            )
+            .push(sidebar)
             .push(widget::divider::vertical::default())
             .push(pages::conversation::view(self))
             .height(Length::Fill)

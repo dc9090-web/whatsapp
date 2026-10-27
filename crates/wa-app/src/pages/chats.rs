@@ -17,8 +17,18 @@ pub fn local_time(ts_ms: i64) -> Option<DateTime<Local>> {
     Local.timestamp_millis_opt(ts_ms).single()
 }
 
-/// Chat-list timestamp: today → "HH:MM", yesterday → "Yesterday",
-/// within the last week → weekday name, otherwise "dd/mm/yyyy".
+/// 12-hour clock, e.g. "9:05 AM".
+pub fn clock(time: DateTime<Local>) -> String {
+    time.format("%-I:%M %p").to_string()
+}
+
+/// Short date, e.g. "12 Jan 2026".
+pub fn short_date(time: DateTime<Local>) -> String {
+    time.format("%-d %b %Y").to_string()
+}
+
+/// Chat-list timestamp: today → "9:05 AM", yesterday → "Yesterday",
+/// within the last week → weekday name, otherwise "12 Jan 2026".
 pub fn format_time(ts_ms: i64, now: DateTime<Local>) -> String {
     let Some(time) = local_time(ts_ms) else {
         return String::new();
@@ -28,10 +38,10 @@ pub fn format_time(ts_ms: i64, now: DateTime<Local>) -> String {
         .signed_duration_since(time.date_naive())
         .num_days();
     match days {
-        d if d <= 0 => time.format("%H:%M").to_string(),
+        d if d <= 0 => clock(time),
         1 => "Yesterday".to_owned(),
         2..=6 => weekday_name(time.weekday()).to_owned(),
-        _ => time.format("%d/%m/%Y").to_string(),
+        _ => short_date(time),
     }
 }
 
@@ -51,14 +61,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let space = theme::spacing();
     let now = Local::now();
 
-    let header = widget::row::with_capacity(2)
-        .align_y(Alignment::Center)
-        .padding([space.space_xs, space.space_s])
-        .push(widget::text::title4("Chats").width(Length::Fill))
-        .push_maybe((app.total_unread > 0).then(|| {
-            widget::text::caption(format!("{} unread", app.total_unread))
-                .class(theme::Text::Custom(widgets::dim_text))
-        }));
+    let header = container(
+        widget::row::with_capacity(2)
+            .align_y(Alignment::Center)
+            .push(widget::text::title4("Chats").width(Length::Fill))
+            .push_maybe((app.total_unread > 0).then(|| {
+                widget::text::caption(format!("{} unread", app.total_unread))
+                    .class(theme::Text::Custom(widgets::dim_text))
+            })),
+    )
+    .height(Length::Fixed(widgets::HEADER_HEIGHT))
+    .padding([0, space.space_m])
+    .align_y(Alignment::Center)
+    .width(Length::Fill);
 
     let list: Element<'_, Message> = if app.chats.is_empty() {
         container(
@@ -79,7 +94,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     } else {
         let mut column = widget::column::with_capacity(app.chats.len())
             .spacing(space.space_xxxs)
-            .padding([0, space.space_xs, space.space_xs, space.space_xs]);
+            .padding([space.space_xxs, space.space_xs]);
         for chat in &app.chats {
             let selected = app.selected.as_ref() == Some(&chat.id);
             column = column.push(row(chat, selected, now));
@@ -87,8 +102,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
         widget::scrollable(column).height(Length::Fill).into()
     };
 
-    widget::column::with_capacity(2)
+    widget::column::with_capacity(3)
         .push(header)
+        .push(widget::divider::horizontal::light())
         .push(list)
         .height(Length::Fill)
         .into()
@@ -104,7 +120,7 @@ fn row(chat: &Chat, selected: bool, now: DateTime<Local>) -> Element<'_, Message
     let unread = chat.unread > 0;
 
     let top = widget::row::with_capacity(2)
-        .spacing(space.space_xxs)
+        .spacing(space.space_xs)
         .align_y(Alignment::Center)
         .push(
             widget::text::body(chat.name.as_str())
@@ -153,7 +169,7 @@ fn row(chat: &Chat, selected: bool, now: DateTime<Local>) -> Element<'_, Message
 
     button::custom(content)
         .width(Length::Fill)
-        .padding([space.space_xs, space.space_xs])
+        .padding([space.space_xs, space.space_s])
         .class(list_row_class(selected))
         .on_press(Message::SelectChat(chat.id.clone()))
         .into()
@@ -172,7 +188,7 @@ mod tests {
         let now = at(2026, 10, 27, 18, 0);
         assert_eq!(
             format_time(at(2026, 10, 27, 9, 5).timestamp_millis(), now),
-            "09:05"
+            "9:05 AM"
         );
     }
 
@@ -203,11 +219,11 @@ mod tests {
         let now = at(2026, 10, 27, 12, 0);
         assert_eq!(
             format_time(at(2026, 10, 20, 12, 0).timestamp_millis(), now),
-            "20/10/2026"
+            "20 Oct 2026"
         );
         assert_eq!(
             format_time(at(2025, 1, 2, 8, 0).timestamp_millis(), now),
-            "02/01/2025"
+            "2 Jan 2025"
         );
     }
 
@@ -216,7 +232,7 @@ mod tests {
         let now = at(2026, 10, 27, 12, 0);
         assert_eq!(
             format_time(at(2026, 10, 27, 12, 1).timestamp_millis(), now),
-            "12:01"
+            "12:01 PM"
         );
     }
 }

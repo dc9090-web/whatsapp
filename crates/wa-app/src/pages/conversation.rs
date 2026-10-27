@@ -9,7 +9,7 @@ use cosmic::widget::{self, button, container, icon};
 use cosmic::{Element, theme};
 use wa_core::{Chat, ChatKind, MessageId, Reaction};
 
-use super::chats::{local_time, weekday_name};
+use super::chats::{clock, local_time, short_date, weekday_name};
 use crate::app::{App, Message};
 use crate::widgets::bubble::{self, BubbleCtx};
 use crate::widgets::media::Thumb;
@@ -106,7 +106,7 @@ pub fn date_label(ts: i64, now: DateTime<Local>) -> String {
         d if d <= 0 => "Today".to_owned(),
         1 => "Yesterday".to_owned(),
         2..=6 => weekday_name(time.weekday()).to_owned(),
-        _ => time.format("%-d %B %Y").to_string(),
+        _ => short_date(time),
     }
 }
 
@@ -178,15 +178,14 @@ fn header<'a>(app: &'a App, conv: &'a Conversation) -> Element<'a, Message> {
     };
     let mut row = widget::row::with_capacity(4)
         .spacing(space.space_s)
-        .align_y(Alignment::Center)
-        .padding([space.space_xs, space.space_m]);
+        .align_y(Alignment::Center);
     if app.core.is_condensed() {
         row = row.push(
             button::icon(icon::from_name("go-previous-symbolic")).on_press(Message::CloseChat),
         );
     }
     row = row
-        .push(widgets::avatar(&conv.chat.name, &conv.chat.id.0, 38.0))
+        .push(widgets::avatar(&conv.chat.name, &conv.chat.id.0, 40.0))
         .push(
             widget::column::with_capacity(2)
                 .width(Length::Fill)
@@ -198,7 +197,12 @@ fn header<'a>(app: &'a App, conv: &'a Conversation) -> Element<'a, Message> {
     if conv.chat.muted {
         row = row.push(icon::from_name("audio-volume-muted-symbolic").size(16));
     }
-    row.into()
+    container(row)
+        .height(Length::Fixed(widgets::HEADER_HEIGHT))
+        .padding([0, space.space_m])
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .into()
 }
 
 fn messages<'a>(app: &'a App, conv: &'a Conversation) -> Element<'a, Message> {
@@ -239,9 +243,7 @@ fn messages<'a>(app: &'a App, conv: &'a Conversation) -> Element<'a, Message> {
                 })
             })
             .unwrap_or_default();
-        let time = local_time(msg.timestamp)
-            .map(|t| t.format("%H:%M").to_string())
-            .unwrap_or_default();
+        let time = local_time(msg.timestamp).map(clock).unwrap_or_default();
         let ctx = BubbleCtx {
             show_sender: is_group && first_of_run,
             sender_label: Some(
@@ -327,8 +329,8 @@ fn reply_banner<'a>(
     .into()
 }
 
-/// Height of the message text field, which the send button matches.
-const COMPOSER_HEIGHT: f32 = 48.0;
+/// Height of the message field and the round send button beside it.
+const COMPOSER_HEIGHT: f32 = 40.0;
 
 fn composer(app: &App) -> Element<'_, Message> {
     let space = theme::spacing();
@@ -337,16 +339,20 @@ fn composer(app: &App) -> Element<'_, Message> {
         .id(composer_id())
         .on_input(Message::ComposerChanged)
         .on_submit(|_| Message::SendComposer)
-        .padding([space.space_xs, space.space_s])
+        .padding([space.space_xxs, space.space_s])
         .width(Length::Fill);
-    // Same height as the text field (measured: 48 px including its border),
-    // rather than a size preset; `Length::Fill` collapses in a shrink row.
-    let send = button::icon(icon::from_name("mail-send-symbolic"))
-        .icon_size(20)
-        .padding([0, space.space_m])
-        .height(Length::Fixed(COMPOSER_HEIGHT))
-        .class(theme::Button::Suggested)
-        .on_press_maybe(can_send.then_some(Message::SendComposer));
+    let send = button::custom(
+        container(icon::from_name("mail-send-symbolic").size(18))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center),
+    )
+    .width(Length::Fixed(COMPOSER_HEIGHT))
+    .height(Length::Fixed(COMPOSER_HEIGHT))
+    .padding(0)
+    .class(widgets::send_class(can_send))
+    .on_press_maybe(can_send.then_some(Message::SendComposer));
     container(
         widget::row::with_capacity(2)
             .spacing(space.space_xs)
@@ -354,7 +360,7 @@ fn composer(app: &App) -> Element<'_, Message> {
             .push(input)
             .push(send),
     )
-    .padding([space.space_xs, space.space_m, space.space_s, space.space_m])
+    .padding([space.space_xs, space.space_m, space.space_m, space.space_m])
     .into()
 }
 
@@ -453,7 +459,7 @@ mod tests {
         assert_eq!(date_label(ms(2026, 10, 27, 8), now), "Today");
         assert_eq!(date_label(ms(2026, 10, 26, 8), now), "Yesterday");
         assert_eq!(date_label(ms(2026, 10, 24, 8), now), "Saturday");
-        assert_eq!(date_label(ms(2026, 3, 5, 8), now), "5 March 2026");
+        assert_eq!(date_label(ms(2026, 3, 5, 8), now), "5 Mar 2026");
     }
 
     #[test]
