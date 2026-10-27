@@ -4,6 +4,7 @@
 //! - `--fake`        run against the scripted demo backend with a throwaway database
 
 mod app;
+mod attach;
 mod audio;
 mod backend_sub;
 mod config;

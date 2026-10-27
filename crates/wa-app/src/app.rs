@@ -1,6 +1,6 @@
 //! The `cosmic::Application`: top-level state, messages and update logic.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -13,6 +13,7 @@ use wa_core::{
     BackendCommand, BackendEvent, Chat, ChatId, ConnectionState, MessageContent, MessageId, Store,
 };
 
+use crate::attach;
 use crate::audio::{self, AudioEvent, AudioHandle};
 use crate::backend_sub::{self, BackendConfig, BackendMsg, CommandSender};
 use crate::config::{Appearance, Config};
@@ -72,6 +73,17 @@ pub enum Message {
     CloseChat,
     ComposerChanged(String),
     SendComposer,
+    /// Open the file chooser to attach a file.
+    PickAttachment,
+    AttachmentPicked(Option<PathBuf>),
+    FilesDropped(Vec<PathBuf>),
+    RemoveAttachment,
+    AttachmentPrepared {
+        chat: ChatId,
+        reply_to: Option<MessageId>,
+        caption: Option<String>,
+        result: Result<attach::Prepared, String>,
+    },
     StartReply(MessageId),
     CancelReply,
     React(MessageId, String),
@@ -134,6 +146,10 @@ pub struct App {
     pub selected: Option<ChatId>,
     pub conversation: Option<Conversation>,
     pub composer: String,
+    /// Files queued for sending; the first is shown above the composer.
+    pub attachments: VecDeque<PathBuf>,
+    /// An attachment is being re-encoded/thumbnailed before sending.
+    pub preparing: bool,
     pub replying_to: Option<wa_core::Message>,
     pub hovered: Option<MessageId>,
     pub menu_for: Option<MessageId>,
@@ -212,6 +228,13 @@ impl App {
         let mut app = Self::blank(core, flags.backend, flags.config, flags.config_handler);
         app._temp_dir = flags.temp_dir;
         app.autostart = desktop::autostart_enabled();
+        // Demo aid: `--fake` can start with a file already queued for sending
+        // (`WA_FAKE_ATTACH=/path/to/file`), since drops need a real pointer.
+        if app.backend_config.fake
+            && let Some(path) = std::env::var_os("WA_FAKE_ATTACH")
+        {
+            app.attachments.push_back(PathBuf::from(path));
+        }
         if store.is_none() {
             app.error = Some("Cannot open the local message database; see the log.".into());
         }
@@ -247,6 +270,8 @@ impl App {
             selected: None,
             conversation: None,
             composer: String::new(),
+            attachments: VecDeque::new(),
+            preparing: false,
             replying_to: None,
             hovered: None,
             menu_for: None,
@@ -1191,6 +1216,9 @@ impl Application for App {
                 cosmic::iced::Event::Window(window::Event::Focused) => {
                     Some(Message::WindowFocused(id))
                 }
+                cosmic::iced::Event::Window(window::Event::FileDropped(paths)) => {
+                    Some(Message::FilesDropped(paths))
+                }
                 _ => None,
             }),
         ])
@@ -1277,6 +1305,28 @@ impl Application for App {
                 let Some(chat) = self.selected.clone() else {
                     return Task::none();
                 };
+                if let Some(path) = self.attachments.front().cloned() {
+                    if self.preparing || self.commands.is_none() {
+                        return Task::none();
+                    }
+                    self.preparing = true;
+                    let caption = (!text.is_empty()).then_some(text);
+                    let reply_to = self.replying_to.as_ref().map(|m| m.id.clone());
+                    return cosmic::task::future(async move {
+                        let result = tokio::task::spawn_blocking(move || {
+                            let out_dir = wa_core::paths::media_dir().map_err(|e| e.to_string())?;
+                            attach::prepare(&path, &out_dir)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                        Message::AttachmentPrepared {
+                            chat,
+                            reply_to,
+                            caption,
+                            result,
+                        }
+                    });
+                }
                 if text.is_empty() {
                     return Task::none();
                 }
@@ -1300,6 +1350,84 @@ impl Application for App {
                     self.error = Some("Not connected — message not sent".into());
                     Task::none()
                 }
+            }
+            Message::AttachmentPrepared {
+                chat,
+                reply_to,
+                caption,
+                result,
+            } => {
+                self.preparing = false;
+                let prepared = match result {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        tracing::warn!(%error, "attachment could not be prepared");
+                        self.error = Some(format!("Could not attach the file: {error}"));
+                        return Task::none();
+                    }
+                };
+                let sent = self.send(BackendCommand::SendMedia {
+                    chat,
+                    local_id: MessageId::new_local(),
+                    path: prepared.path,
+                    kind: prepared.kind,
+                    mime: prepared.mime,
+                    file_name: prepared.file_name,
+                    size: prepared.size,
+                    caption,
+                    thumbnail: prepared.thumbnail,
+                    reply_to,
+                });
+                if sent {
+                    self.attachments.pop_front();
+                    self.composer.clear();
+                    self.replying_to = None;
+                    cosmic::iced::widget::scrollable::snap_to(
+                        conversation::scroll_id(),
+                        RelativeOffset {
+                            x: None,
+                            y: Some(0.0),
+                        },
+                    )
+                } else {
+                    self.error = Some("Not connected — file not sent".into());
+                    Task::none()
+                }
+            }
+            Message::PickAttachment => {
+                if self.selected.is_none() {
+                    return Task::none();
+                }
+                cosmic::task::future(async {
+                    let dialog = cosmic::dialog::file_chooser::open::Dialog::new();
+                    match dialog.open_file().await {
+                        Ok(response) => {
+                            Message::AttachmentPicked(response.url().to_file_path().ok())
+                        }
+                        Err(err) => {
+                            tracing::debug!(?err, "file chooser closed without a file");
+                            Message::AttachmentPicked(None)
+                        }
+                    }
+                })
+            }
+            Message::AttachmentPicked(path) => {
+                if let Some(path) = path.filter(|p| p.is_file()) {
+                    self.attachments.push_back(path);
+                }
+                widget::text_input::focus(conversation::composer_id())
+            }
+            Message::FilesDropped(paths) => {
+                if self.selected.is_none() {
+                    return Task::none();
+                }
+                self.attachments
+                    .extend(paths.into_iter().filter(|p| p.is_file()));
+                Task::none()
+            }
+            Message::RemoveAttachment => {
+                self.attachments.pop_front();
+                Task::none()
             }
             Message::StartReply(id) => {
                 self.menu_for = None;
@@ -1747,6 +1875,70 @@ mod tests {
             reply_to: None,
             status: MessageStatus::Received,
         }
+    }
+
+    #[test]
+    fn attachments_queue_and_send_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.pdf");
+        std::fs::write(&file, b"%PDF").unwrap();
+        let mut app = test_app();
+        app.page = Page::Main;
+        app.selected = Some(ChatId("1@s.whatsapp.net".into()));
+
+        // Missing files are ignored; real ones queue up (drops may bring several).
+        let _ = app.update(Message::AttachmentPicked(Some(dir.path().join("nope.pdf"))));
+        assert!(app.attachments.is_empty());
+        let _ = app.update(Message::FilesDropped(vec![file.clone(), file.clone()]));
+        assert_eq!(app.attachments.len(), 2);
+        let _ = app.update(Message::RemoveAttachment);
+        assert_eq!(app.attachments.len(), 1);
+
+        // Sending with an attachment prepares it first (text becomes the caption).
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        app.commands = Some(CommandSender(tx));
+        app.composer = "see attached".into();
+        let _ = app.update(Message::SendComposer);
+        assert!(app.preparing);
+        assert_eq!(
+            app.composer, "see attached",
+            "composer kept until the send succeeds"
+        );
+
+        // A preparation failure surfaces as an error and keeps the file queued.
+        let _ = app.update(Message::AttachmentPrepared {
+            chat: ChatId("1@s.whatsapp.net".into()),
+            reply_to: None,
+            caption: Some("see attached".into()),
+            result: Err("boom".into()),
+        });
+        assert!(!app.preparing);
+        assert!(app.error.as_deref().unwrap_or_default().contains("boom"));
+        assert_eq!(app.attachments.len(), 1);
+
+        // Without a backend connection the send is refused and reported.
+        app.error = None;
+        app.commands = None;
+        let _ = app.update(Message::AttachmentPrepared {
+            chat: ChatId("1@s.whatsapp.net".into()),
+            reply_to: None,
+            caption: None,
+            result: Ok(attach::Prepared {
+                path: file.clone(),
+                kind: wa_core::MediaKind::Document,
+                mime: "application/pdf".into(),
+                file_name: "doc.pdf".into(),
+                size: 4,
+                thumbnail: None,
+            }),
+        });
+        assert!(
+            app.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Not connected")
+        );
+        assert_eq!(app.attachments.len(), 1);
     }
 
     #[test]

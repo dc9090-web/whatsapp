@@ -89,7 +89,8 @@ impl WhatsAppBackend for FakeBackend {
                     }
                 }
                 _ if !auto_reply => {}
-                BackendCommand::SendText { chat, local_id, .. } => {
+                BackendCommand::SendText { chat, local_id, .. }
+                | BackendCommand::SendMedia { chat, local_id, .. } => {
                     sent += 1;
                     let id = MessageId(format!("fake-{sent}"));
                     let ack = BackendEvent::MessageSent {

@@ -22,7 +22,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::backend::WhatsAppBackend;
 use crate::events::{BackendCommand, BackendEvent, ConnectionState};
-use crate::model::{Message, MessageContent, MessageStatus, QuotedMessage};
+use crate::model::{
+    ChatId, MediaKind, MediaRef, Message, MessageContent, MessageId, MessageStatus, QuotedMessage,
+};
 use crate::store::Store;
 
 /// Capacity of every channel between UI, runtime and backend.
@@ -107,6 +109,7 @@ async fn command_pump(
         if matches!(
             command,
             BackendCommand::SendText { .. }
+                | BackendCommand::SendMedia { .. }
                 | BackendCommand::MarkRead { .. }
                 | BackendCommand::Logout
                 | BackendCommand::DeleteMessage {
@@ -145,7 +148,8 @@ async fn command_pump(
 fn rejected(command: BackendCommand) -> Option<BackendEvent> {
     const WHY: &str = "the WhatsApp backend is not running";
     match command {
-        BackendCommand::SendText { chat, local_id, .. } => Some(BackendEvent::SendFailed {
+        BackendCommand::SendText { chat, local_id, .. }
+        | BackendCommand::SendMedia { chat, local_id, .. } => Some(BackendEvent::SendFailed {
             chat,
             local_id,
             error: WHY.to_owned(),
@@ -231,6 +235,26 @@ async fn forward(ui: &mpsc::Sender<BackendEvent>, events: Vec<BackendEvent>) {
     }
 }
 
+/// The quote block for a reply, from the stored message being replied to.
+fn quoted(store: &Store, chat: &ChatId, id: &MessageId) -> QuotedMessage {
+    let quoted = store.message(chat, id).unwrap_or_else(|e| {
+        tracing::error!("loading quoted message {}: {e:#}", id.0);
+        None
+    });
+    match quoted {
+        Some(q) => QuotedMessage {
+            id: id.clone(),
+            sender: q.sender,
+            snippet: q.content.preview(),
+        },
+        None => QuotedMessage {
+            id: id.clone(),
+            sender: String::new(),
+            snippet: String::new(),
+        },
+    }
+}
+
 /// Optimistic effects of a UI command. Returns the events to emit before the
 /// command is forwarded to the backend.
 fn apply_command(
@@ -239,6 +263,64 @@ fn apply_command(
     logout_requested: &mut bool,
 ) -> Vec<BackendEvent> {
     match command {
+        BackendCommand::SendMedia {
+            chat,
+            local_id,
+            path,
+            kind,
+            mime,
+            file_name,
+            size,
+            caption,
+            thumbnail,
+            reply_to,
+        } => {
+            let media = MediaRef {
+                mime: mime.clone(),
+                size: *size,
+                thumbnail: thumbnail.clone(),
+                local_path: Some(path.clone()),
+                download_token: Vec::new(),
+            };
+            let content = match kind {
+                MediaKind::Image => MessageContent::Image {
+                    caption: caption.clone(),
+                    media,
+                },
+                MediaKind::Video => MessageContent::Video {
+                    caption: caption.clone(),
+                    media,
+                },
+                MediaKind::Audio => MessageContent::Audio {
+                    voice_note: false,
+                    duration_secs: 0,
+                    media,
+                },
+                MediaKind::Document => MessageContent::Document {
+                    file_name: file_name.clone(),
+                    caption: caption.clone(),
+                    media,
+                },
+            };
+            let message = Message {
+                id: local_id.clone(),
+                chat: chat.clone(),
+                sender: String::new(),
+                sender_name: None,
+                from_me: true,
+                timestamp: now_ms(),
+                content,
+                reply_to: reply_to.as_ref().map(|id| quoted(store, chat, id)),
+                status: MessageStatus::Pending,
+            };
+            let mut events = Vec::with_capacity(2);
+            if let Err(e) = store.upsert_message(&message) {
+                tracing::error!("storing outgoing media message: {e:#}");
+                events.push(BackendEvent::Error(format!("Storage error: {e:#}")));
+            }
+            events.push(BackendEvent::Message(message));
+            events
+        }
         BackendCommand::DeleteMessage {
             chat,
             message,
@@ -264,24 +346,7 @@ fn apply_command(
             reply_to,
             local_id,
         } => {
-            let reply_to = reply_to.as_ref().map(|id| {
-                let quoted = store.message(chat, id).unwrap_or_else(|e| {
-                    tracing::error!("loading quoted message {}: {e:#}", id.0);
-                    None
-                });
-                match quoted {
-                    Some(q) => QuotedMessage {
-                        id: id.clone(),
-                        sender: q.sender,
-                        snippet: q.content.preview(),
-                    },
-                    None => QuotedMessage {
-                        id: id.clone(),
-                        sender: String::new(),
-                        snippet: String::new(),
-                    },
-                }
-            });
+            let reply_to = reply_to.as_ref().map(|id| quoted(store, chat, id));
             let message = Message {
                 id: local_id.clone(),
                 chat: chat.clone(),

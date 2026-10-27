@@ -399,7 +399,8 @@ async fn idle(
 
 async fn reject(shared: &Shared, cmd: BackendCommand, why: &str) {
     match cmd {
-        BackendCommand::SendText { chat, local_id, .. } => {
+        BackendCommand::SendText { chat, local_id, .. }
+        | BackendCommand::SendMedia { chat, local_id, .. } => {
             shared
                 .emit(BackendEvent::SendFailed {
                     chat,
@@ -643,6 +644,48 @@ async fn handle_command(shared: &Arc<Shared>, client: &Arc<Client>, cmd: Backend
                     .await;
             }
         },
+        BackendCommand::SendMedia {
+            chat,
+            local_id,
+            path,
+            kind,
+            mime,
+            file_name,
+            caption,
+            thumbnail,
+            reply_to,
+            ..
+        } => {
+            let shared = Arc::clone(shared);
+            let client = Arc::clone(client);
+            tokio::spawn(async move {
+                let outgoing = OutgoingMedia {
+                    path,
+                    kind,
+                    mime,
+                    file_name,
+                    caption,
+                    thumbnail,
+                    reply_to,
+                };
+                let ev = match send_media(&shared, &client, &chat, outgoing).await {
+                    Ok(id) => BackendEvent::MessageSent {
+                        chat,
+                        local_id,
+                        id: MessageId(id),
+                    },
+                    Err(e) => {
+                        tracing::warn!("media send failed: {e:#}");
+                        BackendEvent::SendFailed {
+                            chat,
+                            local_id,
+                            error: format!("{e:#}"),
+                        }
+                    }
+                };
+                shared.emit(ev).await;
+            });
+        }
         BackendCommand::React {
             chat,
             target,
@@ -793,26 +836,138 @@ async fn send_text(
     reply_to: Option<MessageId>,
 ) -> anyhow::Result<String> {
     let to = parse_jid(chat)?;
-    let message = match reply_to.and_then(|id| shared.key(chat, &id.0).map(|rec| (id, rec))) {
-        Some((id, rec)) => {
-            let quoted = rec
-                .quote
-                .as_deref()
-                .and_then(|q| codec::message_decode(q).ok())
-                .unwrap_or_default();
-            let sender = rec
-                .sender
-                .parse::<Jid>()
-                .ok()
-                .or_else(|| if rec.from_me { client.pn() } else { None })
-                .unwrap_or_else(|| to.clone());
-            let ctx =
-                proto_helpers::build_quote_context_with_info(&id.0, &sender, &to, &to, &quoted);
-            wa::Message::text_with_context(text, ctx)
-        }
+    let message = match quote_context(shared, client, chat, reply_to, &to) {
+        Some(ctx) => wa::Message::text_with_context(text, ctx),
         None => wa::Message::text(text),
     };
     let result = client.send_message(to, message.clone()).await?;
+    let own = own_jid(client);
+    let meta = convert::MsgMeta {
+        id: result.message_id.clone(),
+        chat: chat.clone(),
+        sender: own.clone(),
+        sender_name: None,
+        from_me: true,
+        timestamp: now_ms(),
+        status: crate::model::MessageStatus::Sent,
+    };
+    shared.put_keys(&[convert::key_record(&meta, &message, &own)]);
+    Ok(result.message_id)
+}
+
+/// The quote context for a reply to `reply_to`, if we still know that message.
+fn quote_context(
+    shared: &Shared,
+    client: &Arc<Client>,
+    chat: &ChatId,
+    reply_to: Option<MessageId>,
+    to: &Jid,
+) -> Option<wa::ContextInfo> {
+    let (id, rec) = reply_to.and_then(|id| shared.key(chat, &id.0).map(|rec| (id, rec)))?;
+    let quoted = rec
+        .quote
+        .as_deref()
+        .and_then(|q| codec::message_decode(q).ok())
+        .unwrap_or_default();
+    let sender = rec
+        .sender
+        .parse::<Jid>()
+        .ok()
+        .or_else(|| if rec.from_me { client.pn() } else { None })
+        .unwrap_or_else(|| to.clone());
+    Some(proto_helpers::build_quote_context_with_info(
+        &id.0, &sender, to, to, &quoted,
+    ))
+}
+
+/// A file the UI prepared for sending.
+struct OutgoingMedia {
+    path: PathBuf,
+    kind: crate::model::MediaKind,
+    mime: String,
+    file_name: String,
+    caption: Option<String>,
+    thumbnail: Option<Vec<u8>>,
+    reply_to: Option<MessageId>,
+}
+
+/// Uploads the file (encrypted, to WhatsApp's CDN) and sends the matching
+/// media message. Returns the server message id.
+async fn send_media(
+    shared: &Shared,
+    client: &Arc<Client>,
+    chat: &ChatId,
+    media: OutgoingMedia,
+) -> anyhow::Result<String> {
+    use crate::model::MediaKind;
+    use whatsapp_rust::media::{self, AudioOptions, DocumentOptions, ImageOptions, VideoOptions};
+    use whatsapp_rust::wacore::download::MediaType;
+
+    let to = parse_jid(chat)?;
+    let data = tokio::fs::read(&media.path)
+        .await
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", media.path.display()))?;
+    let media_type = match media.kind {
+        MediaKind::Image => MediaType::Image,
+        MediaKind::Video => MediaType::Video,
+        MediaKind::Audio => MediaType::Audio,
+        MediaKind::Document => MediaType::Document,
+    };
+    let upload = client
+        .upload(
+            data,
+            media_type,
+            whatsapp_rust::upload::UploadOptions::new(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("upload failed: {e:#}"))?;
+    let context_info = quote_context(shared, client, chat, media.reply_to, &to).map(Box::new);
+    let message = match media.kind {
+        MediaKind::Image => media::image_message(
+            upload,
+            ImageOptions {
+                caption: media.caption,
+                mimetype: Some(media.mime),
+                jpeg_thumbnail: media.thumbnail,
+                context_info,
+            },
+        ),
+        MediaKind::Video => media::video_message(
+            upload,
+            VideoOptions {
+                caption: media.caption,
+                mimetype: Some(media.mime),
+                jpeg_thumbnail: media.thumbnail,
+                context_info,
+                ..Default::default()
+            },
+        ),
+        MediaKind::Audio => media::audio_message(
+            upload,
+            AudioOptions {
+                mimetype: Some(media.mime),
+                ptt: Some(false),
+                context_info,
+                ..Default::default()
+            },
+        ),
+        MediaKind::Document => media::document_message(
+            upload,
+            DocumentOptions {
+                mimetype: Some(media.mime),
+                file_name: Some(media.file_name.clone()),
+                title: Some(media.file_name),
+                caption: media.caption,
+                jpeg_thumbnail: media.thumbnail,
+                context_info,
+                ..Default::default()
+            },
+        ),
+    };
+    let result = client
+        .send_message(to, message.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("send failed: {e:#}"))?;
     let own = own_jid(client);
     let meta = convert::MsgMeta {
         id: result.message_id.clone(),

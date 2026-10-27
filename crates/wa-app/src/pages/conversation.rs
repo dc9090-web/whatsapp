@@ -12,6 +12,7 @@ use wa_core::{Chat, ChatKind, MessageId, Reaction};
 
 use super::chats::{clock, local_time, short_date, weekday_name};
 use crate::app::{App, Message};
+use crate::attach;
 use crate::widgets::bubble::{self, BubbleCtx};
 use crate::widgets::media::Thumb;
 use crate::widgets::{self, reactions};
@@ -142,6 +143,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .push(messages(app, conv));
     if let Some(reply) = &app.replying_to {
         column = column.push(reply_banner(conv, reply, app.own_jid.as_deref()));
+    }
+    if let Some(strip) = attachment_strip(app) {
+        column = column.push(strip);
     }
     column
         .push(composer(app))
@@ -339,10 +343,97 @@ fn reply_banner<'a>(
 /// Height of the message field and the round send button beside it.
 const COMPOSER_HEIGHT: f32 = 40.0;
 
+/// The queued attachment, shown above the composer until it is sent.
+fn attachment_strip(app: &App) -> Option<Element<'_, Message>> {
+    let space = theme::spacing();
+    let path = app.attachments.front()?;
+    let (kind, _) = attach::classify(path);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let preview: Element<'_, Message> = if kind == wa_core::MediaKind::Image {
+        widget::image(widget::image::Handle::from_path(path))
+            .width(Length::Fixed(48.0))
+            .height(Length::Fixed(48.0))
+            .content_fit(cosmic::iced::ContentFit::Cover)
+            .border_radius([6.0; 4])
+            .into()
+    } else {
+        let icon_name = match kind {
+            wa_core::MediaKind::Video => "video-x-generic-symbolic",
+            wa_core::MediaKind::Audio => "audio-x-generic-symbolic",
+            _ => "x-office-document-symbolic",
+        };
+        container(icon::from_name(icon_name).size(28))
+            .width(Length::Fixed(48.0))
+            .height(Length::Fixed(48.0))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .into()
+    };
+    let mut detail = format!(
+        "{} · {}",
+        attach::kind_label(kind),
+        widgets::format_size(size)
+    );
+    if app.attachments.len() > 1 {
+        detail.push_str(&format!(" · {} more queued", app.attachments.len() - 1));
+    }
+    if app.preparing {
+        detail.push_str(" · preparing…");
+    }
+    Some(
+        container(
+            widget::row::with_capacity(3)
+                .spacing(space.space_s)
+                .align_y(Alignment::Center)
+                .push(preview)
+                .push(
+                    widget::column::with_capacity(2)
+                        .width(Length::Fill)
+                        .push(
+                            widget::text::body(name)
+                                .font(cosmic::font::semibold())
+                                .wrapping(Wrapping::None),
+                        )
+                        .push(
+                            widget::text::caption(detail)
+                                .class(theme::Text::Custom(widgets::dim_text)),
+                        ),
+                )
+                .push(
+                    button::icon(icon::from_name("window-close-symbolic"))
+                        .on_press(Message::RemoveAttachment),
+                ),
+        )
+        .padding([space.space_xs, space.space_m])
+        .class(theme::Container::custom(|theme| container::Style {
+            background: Some(Background::Color(theme.cosmic().primary(false).base.into())),
+            ..container::Style::default()
+        }))
+        .into(),
+    )
+}
+
 fn composer(app: &App) -> Element<'_, Message> {
     let space = theme::spacing();
-    let can_send = !app.composer.trim().is_empty() && app.commands.is_some();
-    let input = widget::text_input("Type a message", app.composer.as_str())
+    let has_attachment = !app.attachments.is_empty();
+    let can_send = (!app.composer.trim().is_empty() || has_attachment)
+        && app.commands.is_some()
+        && !app.preparing;
+    let placeholder = if has_attachment {
+        "Add a caption…"
+    } else {
+        "Type a message"
+    };
+    let attach = widget::tooltip(
+        button::icon(icon::from_name("mail-attachment-symbolic")).on_press(Message::PickAttachment),
+        widget::text::caption("Attach a file"),
+        widget::tooltip::Position::Top,
+    );
+    let input = widget::text_input(placeholder, app.composer.as_str())
         .id(composer_id())
         .on_input(Message::ComposerChanged)
         .on_submit(|_| Message::SendComposer)
@@ -361,9 +452,10 @@ fn composer(app: &App) -> Element<'_, Message> {
     .class(widgets::send_class(can_send))
     .on_press_maybe(can_send.then_some(Message::SendComposer));
     container(
-        widget::row::with_capacity(2)
+        widget::row::with_capacity(3)
             .spacing(space.space_xs)
             .align_y(Alignment::Center)
+            .push(attach)
             .push(input)
             .push(send),
     )

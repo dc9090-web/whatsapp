@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use crate::model::{
-    Chat, ChatId, MediaRef, Message, MessageContent, MessageId, MessageStatus, Reaction,
+    Chat, ChatId, MediaKind, MediaRef, Message, MessageContent, MessageId, MessageStatus, Reaction,
 };
 
 /// UI → backend.
@@ -47,6 +47,20 @@ pub enum BackendCommand {
     /// Delete a chat with all its messages, locally and on the phone.
     DeleteChat {
         chat: ChatId,
+    },
+    /// Send a file as a media message. `path` is already in its final form
+    /// (images re-encoded as JPEG by the UI); `thumbnail` is a small JPEG.
+    SendMedia {
+        chat: ChatId,
+        local_id: MessageId,
+        path: PathBuf,
+        kind: MediaKind,
+        mime: String,
+        file_name: String,
+        size: u64,
+        caption: Option<String>,
+        thumbnail: Option<Vec<u8>>,
+        reply_to: Option<MessageId>,
     },
     /// Unlink this device from the account.
     Logout,

@@ -100,6 +100,15 @@ pub struct QuotedMessage {
     pub snippet: String,
 }
 
+/// What kind of media message a file is sent as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MediaKind {
+    Image,
+    Video,
+    Audio,
+    Document,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MessageContent {
     Text(String),

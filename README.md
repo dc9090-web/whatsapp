@@ -35,6 +35,7 @@ single binary that follows your COSMIC theme and accent colour.
 - 🎙️ **Voice notes and audio** with in-app playback (OGG/Opus)
 - 📄 **Documents and videos** with download and open
 - ⬇️ **Save to Downloads** on every image, video and document, named the way WhatsApp names files (`WhatsApp Image 2026-10-27 at 2.02 PM.jpg`)
+- 📎 **Send files** — attach with the 📎 button (COSMIC file chooser) or drop files onto the window; pictures are resized and re-encoded like WhatsApp does, with an optional caption; videos, audio and documents go as they are
 
 ### 🖥️ Desktop integration
 - 🔔 **Notifications** through COSMIC's notification daemon, with the sender's picture; one per chat that updates in place; click to open the chat; previews optional
@@ -54,7 +55,7 @@ single binary that follows your COSMIC theme and accent colour.
 - 🚪 **Log out** unlinks the device and wipes everything local
 
 ### 🚧 Not yet
-Voice/video calls · status/stories · sending media · search · creating or administering groups · multiple accounts
+Voice/video calls · status/stories · search · creating or administering groups · multiple accounts
 
 ## Build and run
 
@@ -187,6 +188,7 @@ docs/superpowers/                 the design spec and implementation plan this w
 - [ ] **Media:** an incoming image and sticker display; a voice note plays; a document downloads and opens; Save to Downloads works
 - [ ] **Profile pictures:** contacts and groups show their pictures
 - [ ] **Delete:** "Delete for everyone" on your own message shows the placeholder on the phone too; "Delete for me" and "Delete chat" disappear on the phone
+- [ ] **Send media:** a photo (with caption), a video, an audio file and a PDF arrive on the phone and display correctly; a reply to a message with a photo keeps the quote
 - [ ] **Reconnect:** disable networking for a minute, re-enable; the app reconnects and catches up
 - [ ] **Remote logout:** remove the linked device on the phone; the app returns to the QR screen
 - [ ] **Log out** from the app's menu wipes the local data
