@@ -18,5 +18,5 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs"] }
 tracing = "0.1"
 # `simd` (on by default in 0.7.0) needs nightly portable_simd, so defaults are off.
-whatsapp-rust = { version = "0.7", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native"] }
+whatsapp-rust = { version = "0.7", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "voip"] }
 libcosmic = { git = "https://github.com/pop-os/libcosmic", rev = "8990a058e1deb8f9f7f4c0a42f6b1362fa1437ec", default-features = false, features = ["winit", "wayland", "tokio", "multi-window", "wgpu", "dbus-config", "a11y", "xdg-portal"] }

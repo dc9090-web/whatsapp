@@ -55,6 +55,36 @@ pub enum Dialog {
     NewGroup,
 }
 
+/// What the call banner shows.
+#[derive(Debug, Clone)]
+pub struct CallUi {
+    /// Empty until the backend reports the id of a call we placed.
+    pub call_id: String,
+    pub chat: ChatId,
+    pub name: String,
+    pub incoming: bool,
+    pub state: wa_core::CallState,
+    pub muted: bool,
+    /// Seconds since the call became active.
+    pub seconds: u64,
+}
+
+impl CallUi {
+    pub fn is_live(&self) -> bool {
+        !matches!(self.state, wa_core::CallState::Ended { .. })
+    }
+}
+
+/// "01:23" or "1:02:03".
+pub fn format_elapsed(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
 /// Contents of the "New group" dialog.
 #[derive(Debug, Clone, Default)]
 pub struct NewGroupDraft {
@@ -162,6 +192,14 @@ pub enum Message {
     NewGroupPhone(String),
     NewGroupAddPhone,
     CreateGroup,
+
+    StartCall,
+    AcceptCall,
+    RejectCall,
+    EndCall,
+    ToggleMute,
+    CallTick,
+    ClearCall(String),
     SetAutostart(bool),
     RequestLogout,
     ConfirmLogout,
@@ -215,6 +253,8 @@ pub struct App {
     pub group_add_draft: String,
     pub invite_link: Option<String>,
     pub new_group: NewGroupDraft,
+    /// The current (or just-ended) voice call.
+    pub call: Option<CallUi>,
     pub config: Config,
     pub config_handler: Option<cosmic_config::Config>,
     pub autostart: Option<bool>,
@@ -347,6 +387,7 @@ impl App {
             group_add_draft: String::new(),
             invite_link: None,
             new_group: NewGroupDraft::default(),
+            call: None,
             config,
             config_handler,
             autostart: None,
@@ -518,6 +559,23 @@ impl App {
                 y: Some(from_bottom.clamp(0.0, 1.0)),
             },
         )
+    }
+
+    /// A chat's name for banners and dialogs.
+    fn chat_display_name(&self, chat: &ChatId) -> String {
+        self.chats
+            .iter()
+            .find(|c| &c.id == chat)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| format!("+{}", chat.user()))
+    }
+
+    /// Removes the call banner a few seconds after a call ended.
+    fn clear_call_later(&self, call_id: String) -> Task<Message> {
+        cosmic::task::future(async move {
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            Message::ClearCall(call_id)
+        })
     }
 
     /// Sends a group action for the open chat.
@@ -1015,6 +1073,82 @@ impl App {
             | BackendEvent::MessageRevoked { chat, .. } => {
                 self.schedule_reload(self.selected.as_ref() == Some(&chat))
             }
+            BackendEvent::CallIncoming {
+                call_id,
+                chat,
+                caller_name,
+                ..
+            } => {
+                if self.call.as_ref().is_some_and(CallUi::is_live) {
+                    // Busy: decline quietly.
+                    self.send(BackendCommand::RejectCall { call_id });
+                    return Task::none();
+                }
+                let name = caller_name
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| self.chat_display_name(&chat));
+                self.call = Some(CallUi {
+                    call_id,
+                    chat: chat.clone(),
+                    name: name.clone(),
+                    incoming: true,
+                    state: wa_core::CallState::Ringing,
+                    muted: false,
+                    seconds: 0,
+                });
+                if self.config.notification_sound
+                    && let Some(audio) = &self.audio
+                {
+                    audio.chime();
+                }
+                let picture = self.avatars.get(&chat).cloned();
+                let focused = self.window_focused();
+                cosmic::task::future(async move {
+                    if !focused {
+                        desktop::notify(
+                            &format!("{name} is calling"),
+                            Some("Incoming voice call"),
+                            chat.0,
+                            picture,
+                        );
+                    }
+                    Message::None
+                })
+            }
+            BackendEvent::CallState {
+                call_id,
+                chat,
+                state,
+            } => {
+                let ended = matches!(state, wa_core::CallState::Ended { .. });
+                match &mut self.call {
+                    Some(call)
+                        if call.call_id == call_id
+                            || (call.call_id.is_empty() && call.chat == chat) =>
+                    {
+                        call.call_id = call_id.clone();
+                        call.state = state;
+                    }
+                    None if !ended => {
+                        let name = self.chat_display_name(&chat);
+                        self.call = Some(CallUi {
+                            call_id: call_id.clone(),
+                            chat,
+                            name,
+                            incoming: false,
+                            state,
+                            muted: false,
+                            seconds: 0,
+                        });
+                    }
+                    _ => return Task::none(),
+                }
+                if ended {
+                    self.clear_call_later(call_id)
+                } else {
+                    Task::none()
+                }
+            }
             BackendEvent::GroupInfo(info) => {
                 if self.selected.as_ref() == Some(&info.chat) {
                     self.group_subject_draft = info.subject.clone();
@@ -1418,6 +1552,15 @@ impl Application for App {
             }),
             desktop::subscription().map(Message::Desktop),
             audio::subscription().map(Message::Audio),
+            if self
+                .call
+                .as_ref()
+                .is_some_and(|c| c.state == wa_core::CallState::Active)
+            {
+                cosmic::iced::time::every(Duration::from_secs(1)).map(|_| Message::CallTick)
+            } else {
+                Subscription::none()
+            },
             window::close_requests().map(Message::CloseRequested),
             signals::subscription().map(|()| Message::Quit),
             cosmic::iced::event::listen_with(|event, _status, id| match event {
@@ -1890,6 +2033,92 @@ impl Application for App {
                 self.set_show_context(true);
                 Task::none()
             }
+            Message::StartCall => {
+                let Some(chat) = self.selected.clone() else {
+                    return Task::none();
+                };
+                if self.call.as_ref().is_some_and(CallUi::is_live) || chat.is_group() {
+                    return Task::none();
+                }
+                let name = self.chat_display_name(&chat);
+                if self.send(BackendCommand::StartCall { chat: chat.clone() }) {
+                    self.call = Some(CallUi {
+                        call_id: String::new(),
+                        chat,
+                        name,
+                        incoming: false,
+                        state: wa_core::CallState::Ringing,
+                        muted: false,
+                        seconds: 0,
+                    });
+                } else {
+                    self.error = Some("Not connected — cannot place a call".into());
+                }
+                Task::none()
+            }
+            Message::AcceptCall => {
+                if let Some(call) = &mut self.call
+                    && call.incoming
+                    && call.state == wa_core::CallState::Ringing
+                {
+                    call.state = wa_core::CallState::Connecting;
+                    let call_id = call.call_id.clone();
+                    self.send(BackendCommand::AcceptCall { call_id });
+                }
+                Task::none()
+            }
+            Message::RejectCall => {
+                if let Some(call) = self.call.take() {
+                    self.send(BackendCommand::RejectCall {
+                        call_id: call.call_id,
+                    });
+                }
+                Task::none()
+            }
+            Message::EndCall => {
+                let Some(call) = &mut self.call else {
+                    return Task::none();
+                };
+                if !call.is_live() {
+                    return Task::none();
+                }
+                call.state = wa_core::CallState::Ended {
+                    reason: "You ended the call".to_owned(),
+                };
+                let call_id = call.call_id.clone();
+                self.send(BackendCommand::EndCall {
+                    call_id: call_id.clone(),
+                });
+                self.clear_call_later(call_id)
+            }
+            Message::ToggleMute => {
+                if let Some(call) = &mut self.call
+                    && call.is_live()
+                {
+                    call.muted = !call.muted;
+                    let (call_id, muted) = (call.call_id.clone(), call.muted);
+                    self.send(BackendCommand::SetCallMuted { call_id, muted });
+                }
+                Task::none()
+            }
+            Message::CallTick => {
+                if let Some(call) = &mut self.call
+                    && call.state == wa_core::CallState::Active
+                {
+                    call.seconds += 1;
+                }
+                Task::none()
+            }
+            Message::ClearCall(call_id) => {
+                if self
+                    .call
+                    .as_ref()
+                    .is_some_and(|c| c.call_id == call_id && !c.is_live())
+                {
+                    self.call = None;
+                }
+                Task::none()
+            }
             Message::ShowGroupInfo => {
                 let Some(chat) = self.selected.clone() else {
                     return Task::none();
@@ -2107,6 +2336,9 @@ impl Application for App {
         if let Some(error) = &self.error {
             column = column.push(banner(error.clone(), true));
         }
+        if let Some(call) = &self.call {
+            column = column.push(call_banner(call));
+        }
         if self.page == Page::Main
             && let Some(text) = connection_text(self.connection.as_ref())
         {
@@ -2167,6 +2399,74 @@ pub fn connection_text(state: Option<&ConnectionState>) -> Option<String> {
             Some("Disconnected — messages will arrive when you reconnect".to_owned())
         }
     }
+}
+
+/// The voice-call strip above the pages.
+fn call_banner(call: &CallUi) -> Element<'_, Message> {
+    use wa_core::CallState;
+    let space = theme::spacing();
+    let (text, buttons): (String, Vec<Element<'_, Message>>) = match &call.state {
+        CallState::Ringing if call.incoming => (
+            format!("{} is calling…", call.name),
+            vec![
+                button::suggested("Accept")
+                    .on_press(Message::AcceptCall)
+                    .into(),
+                button::destructive("Decline")
+                    .on_press(Message::RejectCall)
+                    .into(),
+            ],
+        ),
+        CallState::Ringing => (
+            format!("Calling {}…", call.name),
+            vec![button::destructive("End").on_press(Message::EndCall).into()],
+        ),
+        CallState::Connecting => (
+            format!("Connecting to {}…", call.name),
+            vec![button::destructive("End").on_press(Message::EndCall).into()],
+        ),
+        CallState::Active => (
+            format!(
+                "In call with {} · {}",
+                call.name,
+                format_elapsed(call.seconds)
+            ),
+            vec![
+                button::standard(if call.muted { "Unmute" } else { "Mute" })
+                    .on_press(Message::ToggleMute)
+                    .into(),
+                button::destructive("End").on_press(Message::EndCall).into(),
+            ],
+        ),
+        CallState::Ended { reason } => {
+            (format!("Call with {} ended — {reason}", call.name), vec![])
+        }
+    };
+    let active = call.state == CallState::Active;
+    let mut row = widget::row::with_capacity(2 + buttons.len())
+        .spacing(space.space_s)
+        .align_y(Alignment::Center)
+        .push(icon::from_name("call-start-symbolic").size(16))
+        .push(widget::text::body(text).width(Length::Fill));
+    for b in buttons {
+        row = row.push(b);
+    }
+    container(row)
+        .padding([space.space_xs, space.space_m])
+        .width(Length::Fill)
+        .class(theme::Container::custom(move |theme| {
+            let cosmic = theme.cosmic();
+            let bg = if active {
+                crate::widgets::with_alpha(cosmic.accent_color().into(), 0.25)
+            } else {
+                cosmic.primary(false).base.into()
+            };
+            container::Style {
+                background: Some(Background::Color(bg)),
+                ..container::Style::default()
+            }
+        }))
+        .into()
 }
 
 fn banner<'a>(text: String, error: bool) -> Element<'a, Message> {
@@ -2305,6 +2605,53 @@ mod tests {
                 .contains("Not connected")
         );
         assert_eq!(app.attachments.len(), 1);
+    }
+
+    #[test]
+    fn elapsed_formatting() {
+        assert_eq!(format_elapsed(0), "00:00");
+        assert_eq!(format_elapsed(83), "01:23");
+        assert_eq!(format_elapsed(3723), "1:02:03");
+    }
+
+    #[test]
+    fn incoming_call_banner_lifecycle() {
+        let mut app = test_app();
+        app.page = Page::Main;
+        let _ = app.update(Message::Backend(BackendEvent::CallIncoming {
+            call_id: "c1".into(),
+            chat: ChatId("1@s.whatsapp.net".into()),
+            caller_name: Some("Ana".into()),
+            is_video: false,
+        }));
+        let call = app.call.as_ref().expect("call banner");
+        assert!(call.incoming);
+        assert_eq!(call.name, "Ana");
+        assert_eq!(call.state, wa_core::CallState::Ringing);
+
+        let _ = app.update(Message::Backend(BackendEvent::CallState {
+            call_id: "c1".into(),
+            chat: ChatId("1@s.whatsapp.net".into()),
+            state: wa_core::CallState::Active,
+        }));
+        let _ = app.update(Message::CallTick);
+        let _ = app.update(Message::CallTick);
+        assert_eq!(app.call.as_ref().unwrap().seconds, 2);
+
+        let _ = app.update(Message::EndCall);
+        assert!(!app.call.as_ref().unwrap().is_live());
+        let _ = app.update(Message::ClearCall("c1".into()));
+        assert!(app.call.is_none());
+
+        // Declining removes the banner at once.
+        let _ = app.update(Message::Backend(BackendEvent::CallIncoming {
+            call_id: "c2".into(),
+            chat: ChatId("1@s.whatsapp.net".into()),
+            caller_name: None,
+            is_video: true,
+        }));
+        let _ = app.update(Message::RejectCall);
+        assert!(app.call.is_none());
     }
 
     #[test]

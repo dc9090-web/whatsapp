@@ -33,6 +33,8 @@ use whatsapp_rust::{Client, proto_helpers};
 use whatsapp_rust::{ErrorChainExt as _, Jid, PictureType};
 
 use self::convert::{Converted, KeyRecord, LidMap, MediaPayload};
+
+mod calls;
 use self::index::Index;
 use crate::backend::WhatsAppBackend;
 use crate::events::{BackendCommand, BackendEvent, ConnectionState};
@@ -96,6 +98,7 @@ struct Shared {
     logged_out_sent: AtomicBool,
     /// Caps concurrent `FetchAvatar` lookups at [`MAX_AVATAR_DOWNLOADS`].
     avatar_slots: Semaphore,
+    calls: calls::Calls,
 }
 
 impl Shared {
@@ -245,6 +248,7 @@ impl WhatsAppBackend for WhatsAppRustBackend {
             media_dir: self.media_dir.clone(),
             logged_out_sent: AtomicBool::new(false),
             avatar_slots: Semaphore::new(MAX_AVATAR_DOWNLOADS),
+            calls: calls::Calls::default(),
         });
         if let Some(w) = warning {
             shared.emit(BackendEvent::Error(w)).await;
@@ -447,6 +451,23 @@ async fn reject(shared: &Shared, cmd: BackendCommand, why: &str) {
             shared
                 .emit(BackendEvent::Error(format!("Group request failed: {why}")))
                 .await;
+        }
+        BackendCommand::StartCall { chat } => {
+            shared
+                .emit(BackendEvent::CallState {
+                    call_id: String::new(),
+                    chat,
+                    state: crate::model::CallState::Ended {
+                        reason: format!("Call failed: {why}"),
+                    },
+                })
+                .await;
+        }
+        BackendCommand::AcceptCall { .. }
+        | BackendCommand::RejectCall { .. }
+        | BackendCommand::EndCall { .. }
+        | BackendCommand::SetCallMuted { .. } => {
+            tracing::debug!("call command dropped: {why}");
         }
         BackendCommand::Logout | BackendCommand::Shutdown => {}
     }
@@ -977,6 +998,13 @@ async fn handle_command(shared: &Arc<Shared>, client: &Arc<Client>, cmd: Backend
                         .await;
                 }
             }
+        }
+        cmd @ (BackendCommand::StartCall { .. }
+        | BackendCommand::AcceptCall { .. }
+        | BackendCommand::RejectCall { .. }
+        | BackendCommand::EndCall { .. }
+        | BackendCommand::SetCallMuted { .. }) => {
+            calls::handle(shared, client, cmd).await;
         }
         BackendCommand::MarkRead { chat, messages } => {
             if let Err(e) = mark_read(shared, client, &chat, &messages).await {
@@ -1568,6 +1596,9 @@ impl EventPump {
                 self.emit(BackendEvent::Paired).await;
                 self.emit(BackendEvent::SyncProgress(0.0)).await;
             }
+            Event::IncomingCall(incoming) => {
+                calls::on_event(&self.shared, &self.client, incoming).await;
+            }
             Event::PairError(e) => {
                 self.emit(BackendEvent::Error(format!("Pairing failed: {}", e.error)))
                     .await;
@@ -1977,6 +2008,7 @@ mod tests {
             media_dir: PathBuf::from("/nonexistent"),
             logged_out_sent: AtomicBool::new(false),
             avatar_slots: Semaphore::new(MAX_AVATAR_DOWNLOADS),
+            calls: calls::Calls::default(),
         };
         let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
         let chat = ChatId("1@s.whatsapp.net".into());
@@ -2019,6 +2051,7 @@ mod tests {
             media_dir: PathBuf::from("/nonexistent"),
             logged_out_sent: AtomicBool::new(false),
             avatar_slots: Semaphore::new(MAX_AVATAR_DOWNLOADS),
+            calls: calls::Calls::default(),
         };
         shared.emit_logged_out().await;
         shared.emit_logged_out().await;
@@ -2038,6 +2071,7 @@ mod tests {
             media_dir: PathBuf::from("/nonexistent"),
             logged_out_sent: AtomicBool::new(false),
             avatar_slots: Semaphore::new(MAX_AVATAR_DOWNLOADS),
+            calls: calls::Calls::default(),
         };
         let chat = ChatId("15551234567@s.whatsapp.net".into());
         shared.update_name(&chat, "Alice", convert::RANK_PUSH).await;

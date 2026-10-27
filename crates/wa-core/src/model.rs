@@ -134,6 +134,19 @@ pub struct GroupInfo {
     pub owner: Option<String>,
 }
 
+/// Where a voice call is in its life.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallState {
+    /// Incoming: waiting for us to answer. Outgoing: waiting for the peer.
+    Ringing,
+    /// Answered; media is being set up.
+    Connecting,
+    /// Audio is flowing.
+    Active,
+    /// Over, with a short human reason ("You ended the call", "Declined", …).
+    Ended { reason: String },
+}
+
 /// What kind of media message a file is sent as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MediaKind {

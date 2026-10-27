@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use crate::model::{
-    Chat, ChatId, GroupInfo, MediaKind, MediaRef, Message, MessageContent, MessageId,
+    CallState, Chat, ChatId, GroupInfo, MediaKind, MediaRef, Message, MessageContent, MessageId,
     MessageStatus, Reaction,
 };
 
@@ -89,6 +89,23 @@ pub enum BackendCommand {
     GroupAction {
         chat: ChatId,
         action: GroupAction,
+    },
+    /// Place a voice call to a direct chat.
+    StartCall {
+        chat: ChatId,
+    },
+    AcceptCall {
+        call_id: String,
+    },
+    RejectCall {
+        call_id: String,
+    },
+    EndCall {
+        call_id: String,
+    },
+    SetCallMuted {
+        call_id: String,
+        muted: bool,
     },
     /// Unlink this device from the account.
     Logout,
@@ -186,6 +203,19 @@ pub enum BackendEvent {
     },
     GroupLeft {
         chat: ChatId,
+    },
+    /// Someone is calling us (voice, or video which we answer audio-only).
+    CallIncoming {
+        call_id: String,
+        chat: ChatId,
+        caller_name: Option<String>,
+        is_video: bool,
+    },
+    /// A call we placed or answered changed state.
+    CallState {
+        call_id: String,
+        chat: ChatId,
+        state: CallState,
     },
     Error(String),
 }

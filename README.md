@@ -28,6 +28,7 @@ single binary that follows your COSMIC theme and accent colour.
 - ✈️ **Send text** (with replies) — optimistic sending with clear status icons: 🕓 sending → ✓ sent → ✓✓ delivered → ✓✓ read, plus retry when a send fails
 - ❤️ **Reactions** — see everyone's, add your own from a quick bar or the full emoji picker, remove them again
 - 👀 **Read receipts** are sent when you open a chat; reading on your phone clears the unread count here too
+- 📞 **Voice calls** — answer incoming calls (Accept/Decline banner, ringtone, notification) or place one from a chat's header; mute and hang up, with a call timer. Audio runs through the library's end-to-end-encrypted VoIP engine; your microphone and speaker are driven through cpal (ALSA/PipeWire). Video calls are not supported: an incoming video call is answered as voice only.
 - 📸 **Status updates** — a Status page shows your contacts' updates from the last 24 hours grouped by person (text, photos, videos) and lets you post your own text, photo or video status
 - 👥 **Groups** — create a group from your chats or by phone number; a group-info panel shows members and roles, and lets admins rename, set the description, add, remove, promote and demote; anyone can copy the invite link or leave
 - 🔍 **Search** chats by name and messages by text, caption or file name (Ctrl+F); a result opens the chat and outlines the message
@@ -58,7 +59,7 @@ single binary that follows your COSMIC theme and accent colour.
 - 🚪 **Log out** unlinks the device and wipes everything local
 
 ### 🚧 Not yet
-Voice/video calls · multiple accounts
+Video calls · group calls · multiple accounts
 
 ## Build and run
 
@@ -192,6 +193,7 @@ docs/superpowers/                 the design spec and implementation plan this w
 - [ ] **Profile pictures:** contacts and groups show their pictures
 - [ ] **Delete:** "Delete for everyone" on your own message shows the placeholder on the phone too; "Delete for me" and "Delete chat" disappear on the phone
 - [ ] **Send media:** a photo (with caption), a video, an audio file and a PDF arrive on the phone and display correctly; a reply to a message with a photo keeps the quote
+- [ ] **Voice calls:** an incoming call rings (banner + notification), Accept connects with two-way audio, Mute silences the microphone, End hangs up on both sides; an outgoing call rings the phone and connects when answered; Decline and a cancelled call clear the banner
 - [ ] **Status:** a contact's text and photo updates appear on the Status page; posting a text and a photo status shows them on the phone's Status tab
 - [ ] **Groups:** create a group (it appears on the phone); rename it, set a description, add and remove a member, make and dismiss an admin, copy the invite link; leave a group
 - [ ] **Reconnect:** disable networking for a minute, re-enable; the app reconnects and catches up

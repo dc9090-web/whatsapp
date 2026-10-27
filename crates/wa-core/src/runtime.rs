@@ -173,6 +173,17 @@ fn rejected(command: BackendCommand) -> Option<BackendEvent> {
         | BackendCommand::GroupAction { .. } => {
             Some(BackendEvent::Error(format!("Group request failed: {WHY}")))
         }
+        BackendCommand::StartCall { chat } => Some(BackendEvent::CallState {
+            call_id: String::new(),
+            chat,
+            state: crate::model::CallState::Ended {
+                reason: format!("Call failed: {WHY}"),
+            },
+        }),
+        BackendCommand::AcceptCall { .. }
+        | BackendCommand::RejectCall { .. }
+        | BackendCommand::EndCall { .. }
+        | BackendCommand::SetCallMuted { .. } => None,
         BackendCommand::MarkRead { .. }
         | BackendCommand::DeleteMessage { .. }
         | BackendCommand::DeleteChat { .. }
@@ -388,6 +399,11 @@ fn apply_command(
         | BackendCommand::GroupInfo { .. }
         | BackendCommand::CreateGroup { .. }
         | BackendCommand::GroupAction { .. }
+        | BackendCommand::StartCall { .. }
+        | BackendCommand::AcceptCall { .. }
+        | BackendCommand::RejectCall { .. }
+        | BackendCommand::EndCall { .. }
+        | BackendCommand::SetCallMuted { .. }
         | BackendCommand::DeleteMessage {
             for_everyone: true, ..
         }
@@ -463,6 +479,8 @@ fn apply_event(
         | BackendEvent::AvatarMissing { .. }
         | BackendEvent::GroupInviteLink { .. }
         | BackendEvent::GroupLeft { .. }
+        | BackendEvent::CallIncoming { .. }
+        | BackendEvent::CallState { .. }
         | BackendEvent::Error(_) => Ok(()),
     }
 }
@@ -492,6 +510,8 @@ fn event_name(event: &BackendEvent) -> &'static str {
         BackendEvent::GroupCreated { .. } => "GroupCreated",
         BackendEvent::GroupInviteLink { .. } => "GroupInviteLink",
         BackendEvent::GroupLeft { .. } => "GroupLeft",
+        BackendEvent::CallIncoming { .. } => "CallIncoming",
+        BackendEvent::CallState { .. } => "CallState",
         BackendEvent::Error(_) => "Error",
     }
 }

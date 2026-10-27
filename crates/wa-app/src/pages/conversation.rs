@@ -210,6 +210,15 @@ fn header<'a>(app: &'a App, conv: &'a Conversation) -> Element<'a, Message> {
     if conv.chat.muted {
         row = row.push(icon::from_name("audio-volume-muted-symbolic").size(16));
     }
+    if conv.chat.kind == ChatKind::Direct && !conv.chat.id.is_status() {
+        let busy = app.call.as_ref().is_some_and(crate::app::CallUi::is_live);
+        row = row.push(widget::tooltip(
+            button::icon(icon::from_name("call-start-symbolic"))
+                .on_press_maybe((!busy).then_some(Message::StartCall)),
+            widget::text::caption("Voice call"),
+            widget::tooltip::Position::Bottom,
+        ));
+    }
     if conv.chat.kind == ChatKind::Group {
         row = row.push(widget::tooltip(
             button::icon(icon::from_name("dialog-information-symbolic"))

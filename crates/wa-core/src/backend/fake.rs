@@ -10,8 +10,8 @@ use tokio::sync::mpsc;
 use crate::backend::WhatsAppBackend;
 use crate::events::{BackendCommand, BackendEvent, ConnectionState, GroupAction};
 use crate::model::{
-    Chat, ChatId, ChatKind, GroupInfo, GroupMember, MediaRef, Message, MessageContent, MessageId,
-    MessageStatus, QuotedMessage, Reaction,
+    CallState, Chat, ChatId, ChatKind, GroupInfo, GroupMember, MediaRef, Message, MessageContent,
+    MessageId, MessageStatus, QuotedMessage, Reaction,
 };
 
 /// A 320×240 sunset JPEG, also used as the inline thumbnail of demo images.
@@ -76,6 +76,23 @@ impl WhatsAppBackend for FakeBackend {
             tokio::time::sleep(Duration::ZERO).await;
         }
 
+        // Demo aid: `WA_FAKE_INCOMING_CALL=1` rings a call from Alice shortly
+        // after start, so the incoming-call UI can be exercised.
+        if std::env::var_os("WA_FAKE_INCOMING_CALL").is_some() {
+            let events = events.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(4)).await;
+                let _ = events
+                    .send(BackendEvent::CallIncoming {
+                        call_id: "fake-call-in".to_owned(),
+                        chat: ChatId("15550101001@s.whatsapp.net".to_owned()),
+                        caller_name: Some("Alice Johnson".to_owned()),
+                        is_video: false,
+                    })
+                    .await;
+            });
+        }
+        let mut calls = 0u64;
         let mut sent = 0u64;
         let mut groups: std::collections::HashMap<ChatId, GroupInfo> =
             std::collections::HashMap::new();
@@ -279,6 +296,63 @@ impl WhatsAppBackend for FakeBackend {
                         return Ok(());
                     }
                 }
+                BackendCommand::StartCall { chat } => {
+                    calls += 1;
+                    let call_id = format!("fake-call-{calls}");
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        let step = |state| BackendEvent::CallState {
+                            call_id: call_id.clone(),
+                            chat: chat.clone(),
+                            state,
+                        };
+                        let _ = events.send(step(CallState::Ringing)).await;
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                        let _ = events.send(step(CallState::Connecting)).await;
+                        tokio::time::sleep(Duration::from_millis(1200)).await;
+                        let _ = events.send(step(CallState::Active)).await;
+                    });
+                }
+                BackendCommand::AcceptCall { call_id } => {
+                    let chat = ChatId("15550101001@s.whatsapp.net".to_owned());
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        let step = |state| BackendEvent::CallState {
+                            call_id: call_id.clone(),
+                            chat: chat.clone(),
+                            state,
+                        };
+                        let _ = events.send(step(CallState::Connecting)).await;
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                        let _ = events.send(step(CallState::Active)).await;
+                    });
+                }
+                BackendCommand::RejectCall { call_id } => {
+                    let event = BackendEvent::CallState {
+                        call_id,
+                        chat: ChatId("15550101001@s.whatsapp.net".to_owned()),
+                        state: CallState::Ended {
+                            reason: "Declined".to_owned(),
+                        },
+                    };
+                    if events.send(event).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                BackendCommand::EndCall { call_id } => {
+                    let reason = "You ended the call";
+                    let event = BackendEvent::CallState {
+                        call_id,
+                        chat: ChatId("15550101001@s.whatsapp.net".to_owned()),
+                        state: CallState::Ended {
+                            reason: reason.to_owned(),
+                        },
+                    };
+                    if events.send(event).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                BackendCommand::SetCallMuted { .. } => {}
                 BackendCommand::DeleteMessage { .. }
                 | BackendCommand::DeleteChat { .. }
                 | BackendCommand::MarkRead { .. } => {}

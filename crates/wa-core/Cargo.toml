@@ -14,6 +14,8 @@ tokio.workspace = true
 tracing.workspace = true
 whatsapp-rust.workspace = true
 rusqlite = { version = "0.39", features = ["bundled"] }
+# Microphone and speaker for voice calls.
+cpal = "0.18"
 dirs = "6"
 
 [dev-dependencies]
