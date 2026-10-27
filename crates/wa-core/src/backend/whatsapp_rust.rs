@@ -36,6 +36,8 @@ use self::index::Index;
 use crate::backend::WhatsAppBackend;
 use crate::events::{BackendCommand, BackendEvent, ConnectionState};
 use crate::model::{Chat, ChatId, MediaRef, MessageId, Reaction};
+use whatsapp_rust::wacore::types::presence::ReceiptType;
+use whatsapp_rust::wacore_binary::JidExt as _;
 
 pub struct WhatsAppRustBackend {
     session_db: PathBuf,
@@ -55,6 +57,12 @@ impl WhatsAppRustBackend {
 /// is considered done (the phone does not always send a final 100% chunk).
 const SYNC_QUIET: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a finished session's event pump may keep persisting events that
+/// whatsapp-rust already dispatched (they are never re-sent).
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(4);
+/// After the stream was replaced (or the client rejected), try again this
+/// late rather than staying disconnected until a restart.
+const STOPPED_RETRY: Duration = Duration::from_secs(300);
 
 /// Why a session ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,7 +264,10 @@ impl WhatsAppBackend for WhatsAppRustBackend {
                         .await;
                     match idle(&shared, &mut commands, Some(Duration::from_secs(delay))).await {
                         Idle::Shutdown => return Ok(()),
-                        Idle::LoggedOut => SessionEnd::LoggedOut,
+                        Idle::LoggedOut => {
+                            local_logout_offline(&shared).await;
+                            SessionEnd::LoggedOut
+                        }
                         Idle::Elapsed => continue,
                     }
                 }
@@ -273,6 +284,7 @@ impl WhatsAppBackend for WhatsAppRustBackend {
                     match idle(&shared, &mut commands, Some(Duration::from_secs(2))).await {
                         Idle::Shutdown => return Ok(()),
                         Idle::LoggedOut => {
+                            local_logout_offline(&shared).await;
                             wipe_session(&self.session_db, &shared);
                             shared.emit_logged_out().await;
                             shared.logged_out_sent.store(false, Ordering::SeqCst);
@@ -284,9 +296,11 @@ impl WhatsAppBackend for WhatsAppRustBackend {
                     shared
                         .emit(BackendEvent::Connection(ConnectionState::Disconnected))
                         .await;
-                    match idle(&shared, &mut commands, None).await {
-                        Idle::Shutdown | Idle::Elapsed => return Ok(()),
+                    match idle(&shared, &mut commands, Some(STOPPED_RETRY)).await {
+                        Idle::Shutdown => return Ok(()),
+                        Idle::Elapsed => {}
                         Idle::LoggedOut => {
+                            local_logout_offline(&shared).await;
                             wipe_session(&self.session_db, &shared);
                             shared.emit_logged_out().await;
                             shared.logged_out_sent.store(false, Ordering::SeqCst);
@@ -297,6 +311,42 @@ impl WhatsAppBackend for WhatsAppRustBackend {
         }
     }
 }
+
+/// Removes every downloaded (decrypted) media file. Explicit Log out
+/// promises that nothing stored on this computer survives.
+fn wipe_media(media_dir: &Path) {
+    let entries = match std::fs::read_dir(media_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::warn!("could not list {}: {e}", media_dir.display());
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let removed = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if let Err(e) = removed {
+            tracing::warn!("could not remove {}: {e}", path.display());
+        }
+    }
+}
+
+/// A Log out requested while no session is connected: the server is not told,
+/// so the user must remove the device on the phone.
+async fn local_logout_offline(shared: &Shared) {
+    wipe_media(&shared.media_dir);
+    shared
+        .emit(BackendEvent::Error(NOT_UNLINKED.to_owned()))
+        .await;
+}
+
+const NOT_UNLINKED: &str = "Logged out locally, but WhatsApp could not be reached: remove \
+     \"WhatsApp for COSMIC\" under Linked devices on your phone";
 
 fn wipe_session(session_db: &Path, shared: &Shared) {
     remove_db_files(session_db);
@@ -374,11 +424,13 @@ async fn reject(shared: &Shared, cmd: BackendCommand, why: &str) {
 
 /// Forwards bus events, in dispatch order and without dropping, to the
 /// session's event pump.
-struct Forwarder(mpsc::UnboundedSender<Arc<Event>>);
+/// `None` is the end-of-session marker the session loop sends after the bot
+/// stopped, so the pump drains everything dispatched before it and then ends.
+struct Forwarder(mpsc::UnboundedSender<Option<Arc<Event>>>);
 
 impl EventHandler for Forwarder {
     fn handle_event(&self, event: Arc<Event>) {
-        let _ = self.0.send(event);
+        let _ = self.0.send(Some(event));
     }
 }
 
@@ -407,7 +459,7 @@ async fn run_session(
     let (bus_tx, bus_rx) = mpsc::unbounded_channel();
     let bot = Bot::builder()
         .with_backend(store)
-        .with_event_handler(Forwarder(bus_tx))
+        .with_event_handler(Forwarder(bus_tx.clone()))
         .with_device_props(DevicePropsOverride::new().with_os("WhatsApp for COSMIC"))
         .build()
         .await?;
@@ -427,7 +479,8 @@ async fn run_session(
         syncing: false,
         sync_deadline: None,
     };
-    let pump_task = tokio::spawn(pump.run(bus_rx));
+    let mut pump_task = tokio::spawn(pump.run(bus_rx));
+    let mut pump_alive = true;
 
     let end = loop {
         tokio::select! {
@@ -437,8 +490,14 @@ async fn run_session(
                     break SessionEnd::Shutdown;
                 }
                 Some(BackendCommand::Logout) => {
+                    // whatsapp-rust skips the unlink request when offline.
+                    let online = client.is_connected();
                     client.logout().await;
                     shutdown_bot(handle).await;
+                    wipe_media(&shared.media_dir);
+                    if !online {
+                        shared.emit(BackendEvent::Error(NOT_UNLINKED.to_owned())).await;
+                    }
                     break SessionEnd::LoggedOut;
                 }
                 Some(cmd) => handle_command(shared, &client, cmd).await,
@@ -447,6 +506,18 @@ async fn run_session(
                 let end = end.unwrap_or(SessionEnd::Restart);
                 shutdown_bot(handle).await;
                 break end;
+            }
+            res = &mut pump_task, if pump_alive => {
+                // The pump only ends on its own by panicking.
+                pump_alive = false;
+                let msg = match res {
+                    Err(e) if e.is_panic() => "WhatsApp event handling crashed; reconnecting".to_owned(),
+                    _ => "WhatsApp event handling stopped; reconnecting".to_owned(),
+                };
+                tracing::error!("{msg}");
+                shared.emit(BackendEvent::Error(msg)).await;
+                shutdown_bot(handle).await;
+                break SessionEnd::Restart;
             }
             () = &mut handle => {
                 // The run loop ended on its own; see whether the pump knows why.
@@ -459,7 +530,18 @@ async fn run_session(
             }
         }
     };
-    pump_task.abort();
+    if pump_alive {
+        // Let the pump persist what was already dispatched instead of
+        // dropping it: whatsapp-rust will not deliver those events again.
+        let _ = bus_tx.send(None);
+        if tokio::time::timeout(DRAIN_TIMEOUT, &mut pump_task)
+            .await
+            .is_err()
+        {
+            tracing::warn!("event pump did not drain in time; dropping the rest");
+            pump_task.abort();
+        }
+    }
     Ok(end)
 }
 
@@ -698,12 +780,24 @@ async fn fetch_media(
         MediaPayload::Video(m) => m,
         MediaPayload::Document(m) => m,
     };
-    let bytes = client.download(downloadable).await?;
     tokio::fs::create_dir_all(media_dir).await?;
-    // Write to a temp name first so a crash never leaves a truncated file
-    // under the final name (which the cache check above would trust).
+    // Stream to a temp name first (constant memory, whatever the size), so a
+    // crash never leaves a truncated file under the final name (which the
+    // cache check above would trust).
     let tmp = target.with_extension("part");
-    tokio::fs::write(&tmp, &bytes).await?;
+    let file = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)?;
+    match client.download_to_writer(downloadable, file).await {
+        Ok(file) => drop(file),
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e);
+        }
+    }
     tokio::fs::rename(&tmp, &target).await?;
     Ok(target)
 }
@@ -720,7 +814,7 @@ struct EventPump {
 }
 
 impl EventPump {
-    async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Arc<Event>>) {
+    async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Option<Arc<Event>>>) {
         loop {
             let deadline = self.sync_deadline;
             let next = tokio::select! {
@@ -735,7 +829,8 @@ impl EventPump {
                     continue;
                 }
             };
-            let Some(ev) = next else { break };
+            // A closed channel or the end-of-session marker.
+            let Some(Some(ev)) = next else { break };
             self.handle(ev).await;
         }
     }
@@ -842,10 +937,27 @@ impl EventPump {
                 }
             }
             Event::Receipt(r) => {
-                let Some(status) = convert::receipt_status(&r.r#type) else {
+                let group = r.source.is_group || r.source.chat.is_group();
+                if !group {
+                    self.learn_lid(&r.source.chat).await;
+                }
+                let chat = convert::chat_id_from_source(&r.source, &self.shared.lids());
+                if r.r#type == ReceiptType::ReadSelf {
+                    // We read these on another device (the phone).
+                    let read_up_to = r
+                        .message_ids
+                        .iter()
+                        .filter_map(|id| self.shared.key(&chat, id))
+                        .map(|rec| rec.timestamp)
+                        .max();
+                    if let Some(ts) = read_up_to {
+                        self.read_elsewhere(&chat, ts).await;
+                    }
+                    return;
+                }
+                let Some(status) = convert::receipt_status_in(&r.r#type, group) else {
                     return;
                 };
-                let chat = convert::chat_id_from_source(&r.source, &self.shared.lids());
                 for id in &r.message_ids {
                     self.emit(BackendEvent::MessageStatus {
                         chat: chat.clone(),
@@ -923,11 +1035,58 @@ impl EventPump {
                     }
                 });
             }
+            Event::MarkChatAsReadUpdate(u) => {
+                if u.action.read != Some(true) {
+                    return; // "mark as unread" is not mirrored
+                }
+                let Some(ts) = u
+                    .action
+                    .message_range
+                    .as_option()
+                    .and_then(|r| r.last_message_timestamp)
+                else {
+                    return;
+                };
+                if !u.jid.is_group() {
+                    self.learn_lid(&u.jid).await;
+                }
+                let chat = convert::chat_id_for(&u.jid, None, &self.shared.lids());
+                self.read_elsewhere(&chat, convert::sync_ts_to_ms(ts)).await;
+            }
             Event::OfflineSyncCompleted(c) => {
                 tracing::debug!("offline sync completed ({} items)", c.count);
             }
             _ => {}
         }
+    }
+
+    /// Learns the phone number behind a LID-addressed peer from the client's
+    /// own LID→PN cache, so LID-addressed traffic maps to the PN chat.
+    async fn learn_lid(&self, jid: &Jid) {
+        if !jid.is_lid() {
+            return;
+        }
+        let lid_user = jid.user_base().to_owned();
+        if self.shared.lids().contains_key(&lid_user) {
+            return;
+        }
+        if let Ok(Some(entry)) = self.client.get_lid_pn_entry(jid).await {
+            self.shared.remember_lid(&lid_user, &entry.phone_number);
+        }
+    }
+
+    /// The chat was read on another device up to `read_up_to` (ms): clear
+    /// its unread count unless newer messages arrived since.
+    async fn read_elsewhere(&self, chat: &ChatId, read_up_to: i64) {
+        let known = lock(&self.shared.index)
+            .chat_meta(chat)
+            .map(|m| m.known)
+            .unwrap_or(false);
+        if !known {
+            return;
+        }
+        let marker = convert::read_marker(self.shared.chat_snapshot(chat), read_up_to);
+        self.emit(BackendEvent::ChatUpserted(marker)).await;
     }
 
     /// Announces every group we participate in, with its subject.
@@ -959,18 +1118,12 @@ impl EventPump {
             return;
         }
         let own = own_jid(&self.client);
-        let mut lids = self.shared.lids();
         // Learn LID → phone number mappings so LID-addressed direct chats
         // merge with their phone-number chat.
-        if !info.source.is_group && info.source.chat.is_lid() {
-            let lid_user = info.source.chat.user_base().to_owned();
-            if !lids.contains_key(&lid_user)
-                && let Ok(Some(entry)) = self.client.get_lid_pn_entry(&info.source.chat).await
-            {
-                self.shared.remember_lid(&lid_user, &entry.phone_number);
-                lids.insert(lid_user, entry.phone_number.to_string());
-            }
+        if !info.source.is_group {
+            self.learn_lid(&info.source.chat).await;
         }
+        let lids = self.shared.lids();
         let meta = convert::meta_from_info(info, &own, &lids);
         let raw_sender = meta.sender.clone();
         let record = convert::key_record(&meta, msg, &raw_sender);
@@ -1028,10 +1181,11 @@ impl EventPump {
         for (lid, pn) in &batch.lids {
             self.shared.remember_lid(lid, pn);
         }
-        for (chat, name) in &batch.chats {
+        let mut chats = Vec::with_capacity(batch.chats.len());
+        for (chat, name) in batch.chats {
             {
                 let idx = lock(&self.shared.index);
-                if let Some(name) = name
+                if let Some(name) = &name
                     && let Err(e) = idx.set_name(&chat.id, name, convert::RANK_CONVERSATION)
                 {
                     tracing::warn!("index write failed: {e:#}");
@@ -1039,12 +1193,7 @@ impl EventPump {
                 let _ = idx.set_muted(&chat.id, chat.muted);
                 let _ = idx.mark_known(&chat.id);
             }
-            let best = self.shared.chat_snapshot(&chat.id);
-            self.emit(BackendEvent::ChatUpserted(Chat {
-                name: best.name,
-                ..chat.clone()
-            }))
-            .await;
+            chats.push(chat);
         }
         for (chat, name) in &batch.push_names {
             if !chat.is_group() {
@@ -1053,14 +1202,15 @@ impl EventPump {
                     .await;
             }
         }
+        // Best-known names, now that this chunk's names are recorded.
+        for chat in &mut chats {
+            chat.name = self.shared.chat_snapshot(&chat.id).name;
+        }
         let records: Vec<KeyRecord> = batch.items.iter().filter_map(|(_, r)| r.clone()).collect();
         self.shared.put_keys(&records);
-        for (item, _) in batch.items {
-            match item {
-                Converted::Message(m) => self.emit(BackendEvent::Message(m)).await,
-                Converted::Reaction(r) => self.emit(BackendEvent::Reaction(r)).await,
-                Converted::Ignored(_) => {}
-            }
+        let items = batch.items.into_iter().map(|(item, _)| item).collect();
+        for ev in convert::history_events(items, chats) {
+            self.emit(ev).await;
         }
 
         if let Some(p) = progress {
@@ -1100,6 +1250,19 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).expect("ls").count(), 0);
         // Missing files are fine.
         remove_db_files(&db);
+    }
+
+    #[test]
+    fn wipe_media_empties_the_cache_dir() {
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::write(dir.path().join("a.jpg"), b"x").expect("write");
+        std::fs::create_dir(dir.path().join("sub")).expect("mkdir");
+        std::fs::write(dir.path().join("sub/b.ogg"), b"y").expect("write");
+        wipe_media(dir.path());
+        assert!(dir.path().exists());
+        assert_eq!(std::fs::read_dir(dir.path()).expect("ls").count(), 0);
+        // A missing directory is fine.
+        wipe_media(&dir.path().join("missing"));
     }
 
     #[tokio::test]

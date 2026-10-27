@@ -15,6 +15,7 @@ use whatsapp_rust::waproto::codec;
 use whatsapp_rust::waproto::whatsapp as wa;
 
 use crate::backend::fake::OWN_REACTION_SENDER;
+use crate::events::BackendEvent;
 use crate::model::{
     Chat, ChatId, ChatKind, MediaRef, Message, MessageContent, MessageId, MessageStatus,
     QuotedMessage, Reaction,
@@ -625,6 +626,52 @@ pub fn receipt_status(kind: &ReceiptType) -> Option<MessageStatus> {
     }
 }
 
+/// The status a receipt sets on our message. In groups a receipt comes from
+/// one participant, and WhatsApp shows Delivered/Read only once *every*
+/// recipient got there; we do not track participants, so group messages
+/// stay at Sent rather than showing blue ticks after the first reader.
+pub fn receipt_status_in(kind: &ReceiptType, group: bool) -> Option<MessageStatus> {
+    match receipt_status(kind)? {
+        MessageStatus::Delivered | MessageStatus::Read if group => None,
+        status => Some(status),
+    }
+}
+
+/// App-state timestamps arrive in seconds or milliseconds; returns ms.
+pub fn sync_ts_to_ms(t: i64) -> i64 {
+    if t.abs() >= 100_000_000_000 {
+        t
+    } else {
+        secs_to_ms(t)
+    }
+}
+
+/// The `ChatUpserted` payload for "read on another device up to `read_up_to`
+/// (ms)": unread 0 at that activity. The store applies it only when no newer
+/// message exists, and never moves `last_activity` back.
+pub fn read_marker(mut snapshot: Chat, read_up_to: i64) -> Chat {
+    snapshot.unread = 0;
+    snapshot.last_activity = read_up_to;
+    snapshot.last_preview = None;
+    snapshot
+}
+
+/// History events in the order they must be applied: every message first,
+/// then the chats. The store counts each new incoming message as unread, so
+/// announcing the chat last lets the phone's own unread count win.
+pub fn history_events(items: Vec<Converted>, chats: Vec<Chat>) -> Vec<BackendEvent> {
+    let mut out = Vec::with_capacity(items.len() + chats.len());
+    for item in items {
+        match item {
+            Converted::Message(m) => out.push(BackendEvent::Message(m)),
+            Converted::Reaction(r) => out.push(BackendEvent::Reaction(r)),
+            Converted::Ignored(_) => {}
+        }
+    }
+    out.extend(chats.into_iter().map(BackendEvent::ChatUpserted));
+    out
+}
+
 /// Our own estimate of whatsapp-rust's reconnect delay (Fibonacci from 1s,
 /// capped at 900s) for the "Reconnecting in N s" banner. `attempt` is 1-based.
 pub fn reconnect_delay_secs(attempt: u32) -> u64 {
@@ -853,6 +900,17 @@ pub fn convert_history(
             Converted::Reaction(r) => r.timestamp,
             Converted::Ignored(_) => i64::MAX,
         });
+        // The chat is announced *after* its messages (see `history_events`),
+        // so its activity must cover them for the phone's unread count to win.
+        let newest = items
+            .iter()
+            .filter_map(|(c, _)| match c {
+                Converted::Message(m) => Some(m.timestamp),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        chat.last_activity = chat.last_activity.max(newest);
         out.chats.push((chat, name));
         out.items.extend(items);
     }
@@ -1554,6 +1612,79 @@ mod tests {
             batch.push_names,
             vec![(ChatId("15550001111@s.whatsapp.net".into()), "Alice".into())]
         );
+    }
+
+    #[test]
+    fn group_receipts_never_upgrade_past_sent() {
+        assert_eq!(receipt_status_in(&ReceiptType::Read, true), None);
+        assert_eq!(receipt_status_in(&ReceiptType::Delivered, true), None);
+        assert_eq!(
+            receipt_status_in(&ReceiptType::Sent, true),
+            Some(MessageStatus::Sent)
+        );
+        assert_eq!(
+            receipt_status_in(&ReceiptType::Read, false),
+            Some(MessageStatus::Read)
+        );
+        assert_eq!(receipt_status_in(&ReceiptType::ReadSelf, false), None);
+    }
+
+    #[test]
+    fn sync_timestamps_normalise_to_ms() {
+        assert_eq!(sync_ts_to_ms(1_700_000_000), 1_700_000_000_000);
+        assert_eq!(sync_ts_to_ms(1_700_000_000_123), 1_700_000_000_123);
+    }
+
+    #[test]
+    fn history_sync_does_not_double_count_unread() {
+        let chat_id = ChatId("15550001111@s.whatsapp.net".into());
+        let hs = wa::HistorySync {
+            conversations: vec![wa::Conversation {
+                id: chat_id.0.clone(),
+                unread_count: Some(1),
+                // Older than the newest message: activity must still cover it.
+                conversation_timestamp: Some(1_700_000_000),
+                messages: (0..40)
+                    .map(|i| {
+                        wmi(
+                            &format!("M{i}"),
+                            false,
+                            1_700_000_000 + i,
+                            wa::Message::text("hi"),
+                            None,
+                        )
+                    })
+                    .collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let batch = convert_history(&hs, "15559999999@s.whatsapp.net", &LidMap::new(), 0);
+        assert_eq!(batch.chats[0].0.last_activity, 1_700_000_039_000);
+        let items = batch.items.into_iter().map(|(c, _)| c).collect();
+        let chats = batch.chats.into_iter().map(|(c, _)| c).collect();
+        let store = crate::store::Store::open_in_memory().expect("store");
+        for ev in history_events(items, chats) {
+            match ev {
+                BackendEvent::Message(m) => {
+                    store.upsert_message(&m).expect("msg");
+                }
+                BackendEvent::ChatUpserted(c) => store.upsert_chat(&c).expect("chat"),
+                _ => {}
+            }
+        }
+        let chat = store.chat(&chat_id).expect("read").expect("chat");
+        assert_eq!(chat.unread, 1, "the phone's unread count wins");
+        assert_eq!(store.messages(&chat_id, None, 100).expect("msgs").len(), 40);
+
+        // Then the user reads it on the phone.
+        store
+            .upsert_chat(&read_marker(chat.clone(), 1_700_000_039_000))
+            .expect("read marker");
+        let after = store.chat(&chat_id).expect("read").expect("chat");
+        assert_eq!(after.unread, 0);
+        assert_eq!(after.last_activity, chat.last_activity);
+        assert_eq!(after.last_preview, chat.last_preview);
     }
 
     #[test]
