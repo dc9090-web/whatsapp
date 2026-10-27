@@ -2,7 +2,7 @@
 //!
 //! CONTRACT — signatures other crates rely on:
 //!
-//! ```ignore
+//! ```text
 //! pub mod notify {
 //!     /// Shows a freedesktop notification. `body` is None when previews are off.
 //!     /// Clicking the notification sends `chat_id` on `on_click`.
@@ -26,3 +26,10 @@
 //!     pub fn set_enabled(enabled: bool) -> anyhow::Result<()>;
 //! }
 //! ```
+
+/// Application id shared by the notification icon, tray id and autostart entry.
+pub const APP_ID: &str = "com.github.whatsapp-cosmic";
+
+pub mod autostart;
+pub mod notify;
+pub mod tray;
