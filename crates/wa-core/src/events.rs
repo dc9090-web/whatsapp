@@ -3,8 +3,23 @@
 use std::path::PathBuf;
 
 use crate::model::{
-    Chat, ChatId, MediaKind, MediaRef, Message, MessageContent, MessageId, MessageStatus, Reaction,
+    Chat, ChatId, GroupInfo, MediaKind, MediaRef, Message, MessageContent, MessageId,
+    MessageStatus, Reaction,
 };
+
+/// Something to do to a group we are in.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GroupAction {
+    SetSubject(String),
+    /// Empty clears the description.
+    SetDescription(String),
+    Add(Vec<String>),
+    Remove(Vec<String>),
+    Promote(Vec<String>),
+    Demote(Vec<String>),
+    Leave,
+    InviteLink,
+}
 
 /// UI → backend.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +76,19 @@ pub enum BackendCommand {
         caption: Option<String>,
         thumbnail: Option<Vec<u8>>,
         reply_to: Option<MessageId>,
+    },
+    /// Fetch a group's metadata and members (answered by `GroupInfo`).
+    GroupInfo {
+        chat: ChatId,
+    },
+    /// Create a group with these members (phone-number JIDs).
+    CreateGroup {
+        name: String,
+        members: Vec<String>,
+    },
+    GroupAction {
+        chat: ChatId,
+        action: GroupAction,
     },
     /// Unlink this device from the account.
     Logout,
@@ -144,6 +172,19 @@ pub enum BackendEvent {
     },
     /// A chat and all its messages were removed locally.
     ChatDeleted {
+        chat: ChatId,
+    },
+    GroupInfo(GroupInfo),
+    /// A group we created now exists; the runtime adds it to the chat list.
+    GroupCreated {
+        chat: ChatId,
+        name: String,
+    },
+    GroupInviteLink {
+        chat: ChatId,
+        link: String,
+    },
+    GroupLeft {
         chat: ChatId,
     },
     Error(String),

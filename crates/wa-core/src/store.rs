@@ -54,6 +54,15 @@ impl Store {
         Ok(Self { conn })
     }
 
+    /// Renames a chat (a group whose subject changed).
+    pub fn set_chat_name(&self, chat: &ChatId, name: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE chats SET name = ?2 WHERE id = ?1",
+            params![chat.0, name],
+        )?;
+        Ok(())
+    }
+
     /// Records where the chat's downloaded profile picture lives.
     pub fn set_chat_avatar(&self, chat: &ChatId, path: &Path) -> anyhow::Result<()> {
         self.conn.execute(

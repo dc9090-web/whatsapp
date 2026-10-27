@@ -51,6 +51,18 @@ pub enum Dialog {
     ConfirmLogout,
     ConfirmDeleteForEveryone(MessageId),
     ConfirmDeleteChat(ChatId),
+    ConfirmLeaveGroup(ChatId),
+    NewGroup,
+}
+
+/// Contents of the "New group" dialog.
+#[derive(Debug, Clone, Default)]
+pub struct NewGroupDraft {
+    pub name: String,
+    pub filter: String,
+    pub phone: String,
+    pub members: HashSet<ChatId>,
+    pub creating: bool,
 }
 
 // Transient UI messages; boxing the event would only add allocations.
@@ -127,6 +139,28 @@ pub enum Message {
     CloseChatMenu,
     AskDeleteChat(ChatId),
     ConfirmDeleteChat,
+
+    ShowGroupInfo,
+    CloseGroupInfo,
+    GroupSubjectDraft(String),
+    SaveGroupSubject,
+    GroupDescDraft(String),
+    SaveGroupDesc,
+    GroupAddDraft(String),
+    GroupAddMember(String),
+    GroupRemoveMember(String),
+    GroupPromote(String),
+    GroupDemote(String),
+    CopyInviteLink,
+    AskLeaveGroup,
+    ConfirmLeaveGroup,
+    NewGroup,
+    NewGroupName(String),
+    NewGroupFilter(String),
+    NewGroupToggle(ChatId),
+    NewGroupPhone(String),
+    NewGroupAddPhone,
+    CreateGroup,
     SetAutostart(bool),
     RequestLogout,
     ConfirmLogout,
@@ -170,6 +204,14 @@ pub struct App {
     pub dialog: Option<Dialog>,
     pub header_menu_open: bool,
     pub show_settings: bool,
+    /// The group-info drawer for the open group.
+    pub show_group_info: bool,
+    pub group_info: Option<wa_core::GroupInfo>,
+    pub group_subject_draft: String,
+    pub group_desc_draft: String,
+    pub group_add_draft: String,
+    pub invite_link: Option<String>,
+    pub new_group: NewGroupDraft,
     pub config: Config,
     pub config_handler: Option<cosmic_config::Config>,
     pub autostart: Option<bool>,
@@ -294,6 +336,13 @@ impl App {
             dialog: None,
             header_menu_open: false,
             show_settings: false,
+            show_group_info: false,
+            group_info: None,
+            group_subject_draft: String::new(),
+            group_desc_draft: String::new(),
+            group_add_draft: String::new(),
+            invite_link: None,
+            new_group: NewGroupDraft::default(),
             config,
             config_handler,
             autostart: None,
@@ -447,6 +496,13 @@ impl App {
                 y: Some(from_bottom.clamp(0.0, 1.0)),
             },
         )
+    }
+
+    /// Sends a group action for the open chat.
+    fn group_action(&mut self, action: wa_core::GroupAction) {
+        if let Some(chat) = self.selected.clone() {
+            self.send(BackendCommand::GroupAction { chat, action });
+        }
     }
 
     /// Updates the cached unread total.
@@ -627,6 +683,13 @@ impl App {
             self.hovered = None;
             self.menu_for = None;
             self.highlight = None;
+            self.group_info = None;
+            self.invite_link = None;
+            self.group_add_draft.clear();
+            if self.show_group_info {
+                self.show_group_info = false;
+                self.set_show_context(false);
+            }
         }
         self.page = Page::Main;
         self.selected = Some(id);
@@ -918,6 +981,37 @@ impl App {
             | BackendEvent::MessageRevoked { chat, .. } => {
                 self.schedule_reload(self.selected.as_ref() == Some(&chat))
             }
+            BackendEvent::GroupInfo(info) => {
+                if self.selected.as_ref() == Some(&info.chat) {
+                    self.group_subject_draft = info.subject.clone();
+                    self.group_desc_draft = info.description.clone().unwrap_or_default();
+                    self.group_info = Some(info);
+                }
+                self.schedule_reload(false)
+            }
+            BackendEvent::GroupCreated { chat, .. } => {
+                if matches!(self.dialog, Some(Dialog::NewGroup)) {
+                    self.dialog = None;
+                }
+                self.new_group = NewGroupDraft::default();
+                let reload = self.reload_chats();
+                let open = self.open_chat(chat);
+                Task::batch([reload, open])
+            }
+            BackendEvent::GroupInviteLink { chat, link } => {
+                if self.selected.as_ref() == Some(&chat) {
+                    self.invite_link = Some(link.clone());
+                }
+                cosmic::iced::clipboard::write(link)
+            }
+            BackendEvent::GroupLeft { chat } => {
+                if self.selected.as_ref() == Some(&chat) {
+                    self.show_group_info = false;
+                    self.set_show_context(false);
+                    self.group_info = None;
+                }
+                Task::none()
+            }
             BackendEvent::ChatDeleted { chat } => {
                 if self.selected.as_ref() == Some(&chat) {
                     self.selected = None;
@@ -1125,6 +1219,7 @@ impl Application for App {
                 .popup(
                     container(
                         widget::column::with_capacity(2)
+                            .push(item("New group", "contact-new-symbolic", Message::NewGroup))
                             .push(item(
                                 "Settings",
                                 "preferences-system-symbolic",
@@ -1142,7 +1237,22 @@ impl Application for App {
     }
 
     fn context_drawer(&self) -> Option<context_drawer::ContextDrawer<'_, Message>> {
-        if !self.show_settings || !self.core.window.show_context {
+        if !self.core.window.show_context {
+            return None;
+        }
+        if self.show_group_info {
+            let title = self
+                .group_info
+                .as_ref()
+                .map(|g| g.subject.clone())
+                .or_else(|| self.conversation.as_ref().map(|c| c.chat.name.clone()))
+                .unwrap_or_else(|| "Group".to_owned());
+            return Some(
+                context_drawer::context_drawer(pages::group::view(self), Message::CloseGroupInfo)
+                    .title(title),
+            );
+        }
+        if !self.show_settings {
             return None;
         }
         Some(
@@ -1219,6 +1329,15 @@ impl Application for App {
                         .into(),
                 )
             }
+            Dialog::NewGroup => Some(pages::group::new_group_dialog(self)),
+            Dialog::ConfirmLeaveGroup(_) => Some(
+                widget::dialog()
+                    .title("Leave group?")
+                    .body("You will stop receiving messages from this group. Its history stays on this computer until you delete the chat.")
+                    .primary_action(button::destructive("Leave").on_press(Message::ConfirmLeaveGroup))
+                    .secondary_action(button::standard("Cancel").on_press(Message::CloseDialog))
+                    .into(),
+            ),
             Dialog::ConfirmLogout => Some(
                 widget::dialog()
                     .title("Log out of WhatsApp?")
@@ -1728,8 +1847,129 @@ impl Application for App {
             Message::ShowSettings => {
                 self.header_menu_open = false;
                 self.autostart = desktop::autostart_enabled();
+                self.show_group_info = false;
                 self.show_settings = true;
                 self.set_show_context(true);
+                Task::none()
+            }
+            Message::ShowGroupInfo => {
+                let Some(chat) = self.selected.clone() else {
+                    return Task::none();
+                };
+                self.show_settings = false;
+                self.show_group_info = true;
+                self.set_show_context(true);
+                self.send(BackendCommand::GroupInfo { chat });
+                Task::none()
+            }
+            Message::CloseGroupInfo => {
+                self.show_group_info = false;
+                self.set_show_context(false);
+                Task::none()
+            }
+            Message::GroupSubjectDraft(text) => {
+                self.group_subject_draft = text;
+                Task::none()
+            }
+            Message::SaveGroupSubject => {
+                let subject = self.group_subject_draft.trim().to_owned();
+                if !subject.is_empty() {
+                    self.group_action(wa_core::GroupAction::SetSubject(subject));
+                }
+                Task::none()
+            }
+            Message::GroupDescDraft(text) => {
+                self.group_desc_draft = text;
+                Task::none()
+            }
+            Message::SaveGroupDesc => {
+                let text = self.group_desc_draft.trim().to_owned();
+                self.group_action(wa_core::GroupAction::SetDescription(text));
+                Task::none()
+            }
+            Message::GroupAddDraft(text) => {
+                self.group_add_draft = text;
+                Task::none()
+            }
+            Message::GroupAddMember(jid) => {
+                self.group_add_draft.clear();
+                self.group_action(wa_core::GroupAction::Add(vec![jid]));
+                Task::none()
+            }
+            Message::GroupRemoveMember(jid) => {
+                self.group_action(wa_core::GroupAction::Remove(vec![jid]));
+                Task::none()
+            }
+            Message::GroupPromote(jid) => {
+                self.group_action(wa_core::GroupAction::Promote(vec![jid]));
+                Task::none()
+            }
+            Message::GroupDemote(jid) => {
+                self.group_action(wa_core::GroupAction::Demote(vec![jid]));
+                Task::none()
+            }
+            Message::CopyInviteLink => {
+                self.group_action(wa_core::GroupAction::InviteLink);
+                Task::none()
+            }
+            Message::AskLeaveGroup => {
+                if let Some(chat) = self.selected.clone() {
+                    self.dialog = Some(Dialog::ConfirmLeaveGroup(chat));
+                }
+                Task::none()
+            }
+            Message::ConfirmLeaveGroup => {
+                if let Some(Dialog::ConfirmLeaveGroup(chat)) = self.dialog.take() {
+                    self.send(BackendCommand::GroupAction {
+                        chat,
+                        action: wa_core::GroupAction::Leave,
+                    });
+                }
+                Task::none()
+            }
+            Message::NewGroup => {
+                self.header_menu_open = false;
+                self.new_group = NewGroupDraft::default();
+                self.dialog = Some(Dialog::NewGroup);
+                Task::none()
+            }
+            Message::NewGroupName(name) => {
+                self.new_group.name = name;
+                Task::none()
+            }
+            Message::NewGroupFilter(filter) => {
+                self.new_group.filter = filter;
+                Task::none()
+            }
+            Message::NewGroupToggle(id) => {
+                if !self.new_group.members.remove(&id) {
+                    self.new_group.members.insert(id);
+                }
+                Task::none()
+            }
+            Message::NewGroupPhone(phone) => {
+                self.new_group.phone = phone;
+                Task::none()
+            }
+            Message::NewGroupAddPhone => {
+                if let Some(jid) = pages::group::phone_to_jid(&self.new_group.phone) {
+                    self.new_group.members.insert(ChatId(jid));
+                    self.new_group.phone.clear();
+                }
+                Task::none()
+            }
+            Message::CreateGroup => {
+                if !pages::group::can_create(&self.new_group) {
+                    return Task::none();
+                }
+                let members: Vec<String> =
+                    self.new_group.members.iter().map(|c| c.0.clone()).collect();
+                let name = self.new_group.name.trim().to_owned();
+                if self.send(BackendCommand::CreateGroup { name, members }) {
+                    self.new_group.creating = true;
+                } else {
+                    self.error = Some("Not connected — group not created".into());
+                }
                 Task::none()
             }
             Message::CloseSettings => {

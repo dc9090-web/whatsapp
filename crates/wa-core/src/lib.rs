@@ -6,7 +6,7 @@ pub mod runtime;
 pub mod store;
 
 pub use backend::WhatsAppBackend;
-pub use events::{BackendCommand, BackendEvent, ConnectionState};
+pub use events::{BackendCommand, BackendEvent, ConnectionState, GroupAction};
 pub use model::*;
 pub use runtime::{Handle, start};
 pub use store::Store;

@@ -8,10 +8,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 use crate::backend::WhatsAppBackend;
-use crate::events::{BackendCommand, BackendEvent, ConnectionState};
+use crate::events::{BackendCommand, BackendEvent, ConnectionState, GroupAction};
 use crate::model::{
-    Chat, ChatId, ChatKind, MediaRef, Message, MessageContent, MessageId, MessageStatus,
-    QuotedMessage, Reaction,
+    Chat, ChatId, ChatKind, GroupInfo, GroupMember, MediaRef, Message, MessageContent, MessageId,
+    MessageStatus, QuotedMessage, Reaction,
 };
 
 /// A 320×240 sunset JPEG, also used as the inline thumbnail of demo images.
@@ -77,6 +77,9 @@ impl WhatsAppBackend for FakeBackend {
         }
 
         let mut sent = 0u64;
+        let mut groups: std::collections::HashMap<ChatId, GroupInfo> =
+            std::collections::HashMap::new();
+        let mut created = 0u64;
         while let Some(command) = commands.recv().await {
             if let Some(received) = &received {
                 let _ = received.send(command.clone());
@@ -185,12 +188,155 @@ impl WhatsAppBackend for FakeBackend {
                         return Ok(());
                     }
                 }
+                BackendCommand::GroupInfo { chat } => {
+                    let info = groups
+                        .entry(chat.clone())
+                        .or_insert_with(|| demo_group(&chat))
+                        .clone();
+                    if events.send(BackendEvent::GroupInfo(info)).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                BackendCommand::CreateGroup { name, members } => {
+                    created += 1;
+                    let chat = ChatId(format!("12036302555009{created:04}@g.us"));
+                    let mut info = demo_group(&chat);
+                    info.subject = name.clone();
+                    info.me_admin = true;
+                    info.members = members
+                        .iter()
+                        .map(|jid| GroupMember {
+                            jid: jid.clone(),
+                            name: None,
+                            admin: false,
+                            superadmin: false,
+                        })
+                        .chain(std::iter::once(me_member()))
+                        .collect();
+                    groups.insert(chat.clone(), info.clone());
+                    for event in [
+                        BackendEvent::GroupCreated { chat, name },
+                        BackendEvent::GroupInfo(info),
+                    ] {
+                        if events.send(event).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+                BackendCommand::GroupAction { chat, action } => {
+                    let info = groups
+                        .entry(chat.clone())
+                        .or_insert_with(|| demo_group(&chat));
+                    let event = match action {
+                        GroupAction::SetSubject(s) => {
+                            info.subject = s;
+                            BackendEvent::GroupInfo(info.clone())
+                        }
+                        GroupAction::SetDescription(d) => {
+                            info.description = (!d.is_empty()).then_some(d);
+                            BackendEvent::GroupInfo(info.clone())
+                        }
+                        GroupAction::Add(jids) => {
+                            for jid in jids {
+                                if !info.members.iter().any(|m| m.jid == jid) {
+                                    info.members.push(GroupMember {
+                                        jid,
+                                        name: None,
+                                        admin: false,
+                                        superadmin: false,
+                                    });
+                                }
+                            }
+                            BackendEvent::GroupInfo(info.clone())
+                        }
+                        GroupAction::Remove(jids) => {
+                            info.members.retain(|m| !jids.contains(&m.jid));
+                            BackendEvent::GroupInfo(info.clone())
+                        }
+                        GroupAction::Promote(jids) => {
+                            for m in &mut info.members {
+                                if jids.contains(&m.jid) {
+                                    m.admin = true;
+                                }
+                            }
+                            BackendEvent::GroupInfo(info.clone())
+                        }
+                        GroupAction::Demote(jids) => {
+                            for m in &mut info.members {
+                                if jids.contains(&m.jid) {
+                                    m.admin = false;
+                                }
+                            }
+                            BackendEvent::GroupInfo(info.clone())
+                        }
+                        GroupAction::Leave => BackendEvent::GroupLeft { chat },
+                        GroupAction::InviteLink => BackendEvent::GroupInviteLink {
+                            chat,
+                            link: "https://chat.whatsapp.com/DEMO1234567890".to_owned(),
+                        },
+                    };
+                    if events.send(event).await.is_err() {
+                        return Ok(());
+                    }
+                }
                 BackendCommand::DeleteMessage { .. }
                 | BackendCommand::DeleteChat { .. }
                 | BackendCommand::MarkRead { .. } => {}
             }
         }
         Ok(())
+    }
+}
+
+/// Our own demo identity.
+fn me_member() -> GroupMember {
+    GroupMember {
+        jid: "15550100000@s.whatsapp.net".to_owned(),
+        name: Some("You".to_owned()),
+        admin: true,
+        superadmin: true,
+    }
+}
+
+/// A plausible membership for a demo group; we administer odd-numbered ones.
+fn demo_group(chat: &ChatId) -> GroupInfo {
+    let me_admin = chat.user().bytes().last().is_some_and(|b| b % 2 == 1);
+    let mut me = me_member();
+    me.admin = me_admin;
+    me.superadmin = me_admin;
+    let subject = match chat.user() {
+        "120363025550000001" => "Weekend Hiking 🥾",
+        "120363025550000002" => "Project Atlas",
+        "120363025550000003" => "Family 👨‍👩‍👧",
+        _ => "Group",
+    };
+    GroupInfo {
+        chat: chat.clone(),
+        subject: subject.to_owned(),
+        description: Some("Plans, photos and the odd argument about dates.".to_owned()),
+        members: vec![
+            me,
+            GroupMember {
+                jid: "15550101001@s.whatsapp.net".to_owned(),
+                name: Some("Alice Johnson".to_owned()),
+                admin: true,
+                superadmin: false,
+            },
+            GroupMember {
+                jid: "15550101003@s.whatsapp.net".to_owned(),
+                name: Some("Ben Carter".to_owned()),
+                admin: false,
+                superadmin: false,
+            },
+            GroupMember {
+                jid: "15550101004@s.whatsapp.net".to_owned(),
+                name: Some("Chloe Park".to_owned()),
+                admin: false,
+                superadmin: false,
+            },
+        ],
+        me_admin,
+        owner: Some("15550101001@s.whatsapp.net".to_owned()),
     }
 }
 

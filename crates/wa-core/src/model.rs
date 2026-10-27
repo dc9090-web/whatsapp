@@ -100,6 +100,28 @@ pub struct QuotedMessage {
     pub snippet: String,
 }
 
+/// A group member as the server reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupMember {
+    /// Phone-number JID (`…@s.whatsapp.net`) when known, else the wire JID.
+    pub jid: String,
+    pub name: Option<String>,
+    pub admin: bool,
+    pub superadmin: bool,
+}
+
+/// A group's metadata and membership.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupInfo {
+    pub chat: ChatId,
+    pub subject: String,
+    pub description: Option<String>,
+    pub members: Vec<GroupMember>,
+    /// Whether we may administer the group.
+    pub me_admin: bool,
+    pub owner: Option<String>,
+}
+
 /// What kind of media message a file is sent as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MediaKind {

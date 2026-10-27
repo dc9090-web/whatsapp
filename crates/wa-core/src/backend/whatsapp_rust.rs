@@ -441,6 +441,13 @@ async fn reject(shared: &Shared, cmd: BackendCommand, why: &str) {
         BackendCommand::DeleteMessage { .. } | BackendCommand::DeleteChat { .. } => {
             tracing::debug!("delete not synced to the phone: {why}");
         }
+        BackendCommand::GroupInfo { .. }
+        | BackendCommand::CreateGroup { .. }
+        | BackendCommand::GroupAction { .. } => {
+            shared
+                .emit(BackendEvent::Error(format!("Group request failed: {why}")))
+                .await;
+        }
         BackendCommand::Logout | BackendCommand::Shutdown => {}
     }
 }
@@ -610,6 +617,172 @@ async fn delete_for_me(
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// The group's metadata as our model, with member names from the side index.
+async fn group_info(
+    shared: &Arc<Shared>,
+    client: &Arc<Client>,
+    chat: &ChatId,
+) -> anyhow::Result<crate::model::GroupInfo> {
+    use crate::model::{GroupInfo, GroupMember};
+    let jid = parse_jid(chat)?;
+    let meta = client
+        .groups()
+        .get_metadata(&jid)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let own = ChatId(own_jid(client));
+    let mut me_admin = false;
+    let mut members = Vec::with_capacity(meta.participants.len());
+    for p in &meta.participants {
+        let pn = p.phone_number.as_ref().unwrap_or(&p.jid).to_non_ad_string();
+        let member_chat = ChatId(pn.clone());
+        let name = lock(&shared.index)
+            .chat_meta(&member_chat)
+            .ok()
+            .and_then(|m| m.name);
+        let admin = p.is_admin();
+        if member_chat.user() == own.user() {
+            me_admin = admin;
+        }
+        members.push(GroupMember {
+            jid: pn,
+            name,
+            admin,
+            superadmin: matches!(
+                p.participant_type,
+                whatsapp_rust::ParticipantType::SuperAdmin
+            ),
+        });
+    }
+    Ok(GroupInfo {
+        chat: chat.clone(),
+        subject: meta.subject.clone(),
+        description: meta.description.clone().filter(|d| !d.is_empty()),
+        members,
+        me_admin,
+        owner: meta
+            .creator_pn
+            .as_ref()
+            .or(meta.creator.as_ref())
+            .map(|j| j.to_non_ad_string()),
+    })
+}
+
+async fn create_group(
+    client: &Arc<Client>,
+    name: &str,
+    members: &[String],
+) -> anyhow::Result<ChatId> {
+    let participants = members
+        .iter()
+        .map(|m| {
+            m.parse::<Jid>()
+                .map(|jid| {
+                    whatsapp_rust::GroupParticipantOptions::builder()
+                        .jid(jid)
+                        .finish()
+                })
+                .map_err(|e| anyhow::anyhow!("invalid member {m}: {e}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let options = whatsapp_rust::GroupCreateOptions::builder()
+        .subject(name.to_owned())
+        .participants(participants)
+        .finish();
+    let created = client
+        .groups()
+        .create_group(options)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(ChatId(created.metadata.id.to_non_ad_string()))
+}
+
+/// Performs a group action. `Ok(Some(event))` carries a direct result; `Ok(None)`
+/// means the caller should re-fetch the group's info.
+async fn group_action(
+    client: &Arc<Client>,
+    chat: &ChatId,
+    action: crate::events::GroupAction,
+) -> anyhow::Result<Option<BackendEvent>> {
+    use crate::events::GroupAction;
+    let jid = parse_jid(chat)?;
+    let groups = client.groups();
+    let jids = |list: &[String]| -> anyhow::Result<Vec<Jid>> {
+        list.iter()
+            .map(|m| {
+                m.parse::<Jid>()
+                    .map_err(|e| anyhow::anyhow!("invalid member {m}: {e}"))
+            })
+            .collect()
+    };
+    match action {
+        GroupAction::SetSubject(subject) => {
+            let subject = whatsapp_rust::GroupSubject::new(subject)?;
+            groups
+                .set_subject(jid, subject)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+        GroupAction::SetDescription(text) => {
+            let description = if text.trim().is_empty() {
+                None
+            } else {
+                Some(whatsapp_rust::GroupDescription::new(text)?)
+            };
+            groups
+                .set_description(
+                    jid,
+                    description,
+                    whatsapp_rust::PreviousDescription::Resolve,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+        GroupAction::Add(list) => {
+            groups
+                .add_participants(jid, &jids(&list)?)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+        GroupAction::Remove(list) => {
+            groups
+                .remove_participants(jid, &jids(&list)?)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+        GroupAction::Promote(list) => {
+            groups
+                .promote_participants(jid, &jids(&list)?)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+        GroupAction::Demote(list) => {
+            groups
+                .demote_participants(jid, &jids(&list)?)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+        GroupAction::Leave => {
+            groups
+                .leave(jid)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            return Ok(Some(BackendEvent::GroupLeft { chat: chat.clone() }));
+        }
+        GroupAction::InviteLink => {
+            let link = groups
+                .get_invite_link(jid, false)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            return Ok(Some(BackendEvent::GroupInviteLink {
+                chat: chat.clone(),
+                link,
+            }));
+        }
+    }
+    Ok(None)
+}
+
 fn parse_jid(chat: &ChatId) -> anyhow::Result<Jid> {
     chat.0
         .parse::<Jid>()
@@ -761,6 +934,49 @@ async fn handle_command(shared: &Arc<Shared>, client: &Arc<Client>, cmd: Backend
                     tracing::warn!("chat deletion not synced to the phone: {e:#}");
                 }
             });
+        }
+        BackendCommand::GroupInfo { chat } => {
+            let ev = match group_info(shared, client, &chat).await {
+                Ok(info) => BackendEvent::GroupInfo(info),
+                Err(e) => BackendEvent::Error(format!("Could not load the group: {e:#}")),
+            };
+            shared.emit(ev).await;
+        }
+        BackendCommand::CreateGroup { name, members } => {
+            match create_group(client, &name, &members).await {
+                Ok(chat) => {
+                    shared
+                        .emit(BackendEvent::GroupCreated {
+                            chat: chat.clone(),
+                            name,
+                        })
+                        .await;
+                    if let Ok(info) = group_info(shared, client, &chat).await {
+                        shared.emit(BackendEvent::GroupInfo(info)).await;
+                    }
+                }
+                Err(e) => {
+                    shared
+                        .emit(BackendEvent::Error(format!(
+                            "Could not create the group: {e:#}"
+                        )))
+                        .await;
+                }
+            }
+        }
+        BackendCommand::GroupAction { chat, action } => {
+            match group_action(client, &chat, action).await {
+                Ok(Some(ev)) => shared.emit(ev).await,
+                Ok(None) => match group_info(shared, client, &chat).await {
+                    Ok(info) => shared.emit(BackendEvent::GroupInfo(info)).await,
+                    Err(e) => tracing::warn!("group refresh failed: {e:#}"),
+                },
+                Err(e) => {
+                    shared
+                        .emit(BackendEvent::Error(format!("Group change failed: {e:#}")))
+                        .await;
+                }
+            }
         }
         BackendCommand::MarkRead { chat, messages } => {
             if let Err(e) = mark_read(shared, client, &chat, &messages).await {

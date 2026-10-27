@@ -3,6 +3,7 @@
 
 pub mod chats;
 pub mod conversation;
+pub mod group;
 pub mod login;
 pub mod settings;
 pub mod sync;

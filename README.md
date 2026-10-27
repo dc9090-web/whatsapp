@@ -28,6 +28,7 @@ single binary that follows your COSMIC theme and accent colour.
 - ✈️ **Send text** (with replies) — optimistic sending with clear status icons: 🕓 sending → ✓ sent → ✓✓ delivered → ✓✓ read, plus retry when a send fails
 - ❤️ **Reactions** — see everyone's, add your own from a quick bar or the full emoji picker, remove them again
 - 👀 **Read receipts** are sent when you open a chat; reading on your phone clears the unread count here too
+- 👥 **Groups** — create a group from your chats or by phone number; a group-info panel shows members and roles, and lets admins rename, set the description, add, remove, promote and demote; anyone can copy the invite link or leave
 - 🔍 **Search** chats by name and messages by text, caption or file name (Ctrl+F); a result opens the chat and outlines the message
 - 🗑️ **Delete** messages from the right-click menu — for you (synced to your phone) or, for your own messages, for everyone — and delete whole chats from the chat list
 
@@ -56,7 +57,7 @@ single binary that follows your COSMIC theme and accent colour.
 - 🚪 **Log out** unlinks the device and wipes everything local
 
 ### 🚧 Not yet
-Voice/video calls · status/stories · creating or administering groups · multiple accounts
+Voice/video calls · status/stories · multiple accounts
 
 ## Build and run
 
@@ -190,6 +191,7 @@ docs/superpowers/                 the design spec and implementation plan this w
 - [ ] **Profile pictures:** contacts and groups show their pictures
 - [ ] **Delete:** "Delete for everyone" on your own message shows the placeholder on the phone too; "Delete for me" and "Delete chat" disappear on the phone
 - [ ] **Send media:** a photo (with caption), a video, an audio file and a PDF arrive on the phone and display correctly; a reply to a message with a photo keeps the quote
+- [ ] **Groups:** create a group (it appears on the phone); rename it, set a description, add and remove a member, make and dismiss an admin, copy the invite link; leave a group
 - [ ] **Reconnect:** disable networking for a minute, re-enable; the app reconnects and catches up
 - [ ] **Remote logout:** remove the linked device on the phone; the app returns to the QR screen
 - [ ] **Log out** from the app's menu wipes the local data

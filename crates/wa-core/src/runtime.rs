@@ -168,6 +168,11 @@ fn rejected(command: BackendCommand) -> Option<BackendEvent> {
         } => Some(BackendEvent::Error(format!(
             "Not deleted for everyone: {WHY}"
         ))),
+        BackendCommand::GroupInfo { .. }
+        | BackendCommand::CreateGroup { .. }
+        | BackendCommand::GroupAction { .. } => {
+            Some(BackendEvent::Error(format!("Group request failed: {WHY}")))
+        }
         BackendCommand::MarkRead { .. }
         | BackendCommand::DeleteMessage { .. }
         | BackendCommand::DeleteChat { .. }
@@ -380,6 +385,9 @@ fn apply_command(
         BackendCommand::React { .. }
         | BackendCommand::FetchMedia { .. }
         | BackendCommand::FetchAvatar { .. }
+        | BackendCommand::GroupInfo { .. }
+        | BackendCommand::CreateGroup { .. }
+        | BackendCommand::GroupAction { .. }
         | BackendCommand::DeleteMessage {
             for_everyone: true, ..
         }
@@ -429,6 +437,16 @@ fn apply_event(
             content,
         } => store.replace_content(chat, message, content),
         BackendEvent::ChatDeleted { chat } => store.delete_chat(chat),
+        BackendEvent::GroupInfo(info) => store.set_chat_name(&info.chat, &info.subject),
+        BackendEvent::GroupCreated { chat, name } => store.upsert_chat(&crate::model::Chat {
+            id: chat.clone(),
+            kind: crate::model::ChatKind::Group,
+            name: name.clone(),
+            last_activity: now_ms(),
+            unread: 0,
+            muted: false,
+            last_preview: None,
+        }),
         BackendEvent::LoggedOut => {
             if std::mem::take(logout_requested) {
                 store.wipe()
@@ -443,6 +461,8 @@ fn apply_event(
         | BackendEvent::SyncDone
         | BackendEvent::MediaFailed { .. }
         | BackendEvent::AvatarMissing { .. }
+        | BackendEvent::GroupInviteLink { .. }
+        | BackendEvent::GroupLeft { .. }
         | BackendEvent::Error(_) => Ok(()),
     }
 }
@@ -468,6 +488,10 @@ fn event_name(event: &BackendEvent) -> &'static str {
         BackendEvent::MessageDeleted { .. } => "MessageDeleted",
         BackendEvent::MessageRevoked { .. } => "MessageRevoked",
         BackendEvent::ChatDeleted { .. } => "ChatDeleted",
+        BackendEvent::GroupInfo(_) => "GroupInfo",
+        BackendEvent::GroupCreated { .. } => "GroupCreated",
+        BackendEvent::GroupInviteLink { .. } => "GroupInviteLink",
+        BackendEvent::GroupLeft { .. } => "GroupLeft",
         BackendEvent::Error(_) => "Error",
     }
 }

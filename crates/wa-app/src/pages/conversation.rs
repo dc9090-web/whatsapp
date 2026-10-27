@@ -207,6 +207,14 @@ fn header<'a>(app: &'a App, conv: &'a Conversation) -> Element<'a, Message> {
     if conv.chat.muted {
         row = row.push(icon::from_name("audio-volume-muted-symbolic").size(16));
     }
+    if conv.chat.kind == ChatKind::Group {
+        row = row.push(widget::tooltip(
+            button::icon(icon::from_name("dialog-information-symbolic"))
+                .on_press(Message::ShowGroupInfo),
+            widget::text::caption("Group info"),
+            widget::tooltip::Position::Bottom,
+        ));
+    }
     container(row)
         .height(Length::Fixed(widgets::HEADER_HEIGHT))
         .padding([0, space.space_m])
