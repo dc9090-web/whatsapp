@@ -28,6 +28,7 @@ single binary that follows your COSMIC theme and accent colour.
 - ✈️ **Send text** (with replies) — optimistic sending with clear status icons: 🕓 sending → ✓ sent → ✓✓ delivered → ✓✓ read, plus retry when a send fails
 - ❤️ **Reactions** — see everyone's, add your own from a quick bar or the full emoji picker, remove them again
 - 👀 **Read receipts** are sent when you open a chat; reading on your phone clears the unread count here too
+- 🔍 **Search** chats by name and messages by text, caption or file name (Ctrl+F); a result opens the chat and outlines the message
 - 🗑️ **Delete** messages from the right-click menu — for you (synced to your phone) or, for your own messages, for everyone — and delete whole chats from the chat list
 
 ### 🖼️ Media
@@ -55,7 +56,7 @@ single binary that follows your COSMIC theme and accent colour.
 - 🚪 **Log out** unlinks the device and wipes everything local
 
 ### 🚧 Not yet
-Voice/video calls · status/stories · search · creating or administering groups · multiple accounts
+Voice/video calls · status/stories · creating or administering groups · multiple accounts
 
 ## Build and run
 

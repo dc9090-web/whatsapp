@@ -70,6 +70,13 @@ pub enum Message {
     Audio(AudioEvent),
 
     SelectChat(ChatId),
+    SearchChanged(String),
+    ClearSearch,
+    FocusSearch,
+    OpenSearchResult {
+        chat: ChatId,
+        message: MessageId,
+    },
     CloseChat,
     ComposerChanged(String),
     SendComposer,
@@ -144,6 +151,11 @@ pub struct App {
     pub chats: Vec<Chat>,
     pub total_unread: u32,
     pub selected: Option<ChatId>,
+    /// Chat-list search box contents and the matching messages.
+    pub search: String,
+    pub search_results: Vec<wa_core::Message>,
+    /// Message outlined after jumping to it from a search result.
+    pub highlight: Option<MessageId>,
     pub conversation: Option<Conversation>,
     pub composer: String,
     /// Files queued for sending; the first is shown above the composer.
@@ -270,6 +282,9 @@ impl App {
             selected: None,
             conversation: None,
             composer: String::new(),
+            search: String::new(),
+            search_results: Vec::new(),
+            highlight: None,
             attachments: VecDeque::new(),
             preparing: false,
             replying_to: None,
@@ -398,6 +413,40 @@ impl App {
                     .unwrap_or_else(|e| Err(e.to_string()));
             Message::MediaSaved(id, result)
         })
+    }
+
+    /// Loads older pages until `id` is present, outlines it and scrolls to
+    /// roughly where it sits (by position, since bubble heights vary).
+    fn jump_to(&mut self, id: MessageId) -> Task<Message> {
+        const MAX_PAGES: usize = 40;
+        let mut pages = 0;
+        while self
+            .conversation
+            .as_ref()
+            .is_some_and(|c| c.find(&id).is_none() && !c.exhausted)
+            && pages < MAX_PAGES
+        {
+            let _ = self.load_older();
+            pages += 1;
+        }
+        let Some(conv) = &self.conversation else {
+            return Task::none();
+        };
+        let Some(index) = conv.messages.iter().position(|m| m.id == id) else {
+            tracing::debug!(id = %id.0, "search result not found in the loaded history");
+            return Task::none();
+        };
+        self.highlight = Some(id);
+        let n = conv.messages.len().max(2) as f32;
+        // The list is anchored at the bottom: 0.0 is the newest message.
+        let from_bottom = (n - 1.0 - index as f32) / (n - 1.0);
+        cosmic::iced::widget::scrollable::snap_to(
+            conversation::scroll_id(),
+            RelativeOffset {
+                x: None,
+                y: Some(from_bottom.clamp(0.0, 1.0)),
+            },
+        )
     }
 
     /// Updates the cached unread total.
@@ -577,6 +626,7 @@ impl App {
             self.composer.clear();
             self.hovered = None;
             self.menu_for = None;
+            self.highlight = None;
         }
         self.page = Page::Main;
         self.selected = Some(id);
@@ -1181,6 +1231,11 @@ impl Application for App {
     }
 
     fn on_escape(&mut self) -> Task<Message> {
+        if !self.search.is_empty() {
+            self.search.clear();
+            self.search_results.clear();
+            return Task::none();
+        }
         if self.dialog.take().is_none()
             && self.menu_for.take().is_none()
             && self.chat_menu_for.take().is_none()
@@ -1218,6 +1273,13 @@ impl Application for App {
                 }
                 cosmic::iced::Event::Window(window::Event::FileDropped(paths)) => {
                     Some(Message::FilesDropped(paths))
+                }
+                cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
+                    key: cosmic::iced::keyboard::Key::Character(c),
+                    modifiers,
+                    ..
+                }) if modifiers.control() && c.as_str().eq_ignore_ascii_case("f") => {
+                    Some(Message::FocusSearch)
                 }
                 _ => None,
             }),
@@ -1290,6 +1352,32 @@ impl Application for App {
             }
 
             Message::SelectChat(id) => self.open_chat(id),
+            Message::SearchChanged(query) => {
+                self.search = query;
+                self.search_results = match (&self.store, self.search.trim()) {
+                    (Some(store), q) if q.chars().count() >= 2 => {
+                        store.search_messages(q, 50).unwrap_or_else(|err| {
+                            tracing::error!(?err, "search failed");
+                            Vec::new()
+                        })
+                    }
+                    _ => Vec::new(),
+                };
+                Task::none()
+            }
+            Message::ClearSearch => {
+                self.search.clear();
+                self.search_results.clear();
+                Task::none()
+            }
+            Message::FocusSearch => widget::text_input::focus(pages::chats::search_id()),
+            Message::OpenSearchResult { chat, message } => {
+                let open = self.open_chat(chat);
+                self.search.clear();
+                self.search_results.clear();
+                let jump = self.jump_to(message);
+                Task::batch([open, jump])
+            }
             Message::CloseChat => {
                 self.selected = None;
                 self.conversation = None;

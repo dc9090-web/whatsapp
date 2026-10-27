@@ -242,6 +242,32 @@ impl Store {
         collect_messages(rows)
     }
 
+    /// Messages whose text, caption or file name contains `query`
+    /// (case-insensitively for ASCII), newest first, at most `limit`.
+    pub fn search_messages(&self, query: &str, limit: usize) -> anyhow::Result<Vec<Message>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pattern = format!("%{}%", like_escape(query));
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages
+             WHERE json_extract(content, '$.Text') LIKE ?1 ESCAPE '\\'
+                OR json_extract(content, '$.Image.caption') LIKE ?1 ESCAPE '\\'
+                OR json_extract(content, '$.Video.caption') LIKE ?1 ESCAPE '\\'
+                OR json_extract(content, '$.Document.caption') LIKE ?1 ESCAPE '\\'
+                OR json_extract(content, '$.Document.file_name') LIKE ?1 ESCAPE '\\'
+             ORDER BY ts DESC, rowid DESC LIMIT ?2"
+        );
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![pattern, limit], row_to_raw_message)?;
+        let mut found = collect_messages(rows)?;
+        // `collect_messages` returns ascending order; search wants newest first.
+        found.reverse();
+        Ok(found)
+    }
+
     /// Up to `limit` messages that sort before the stored message `oldest`
     /// (whose timestamp is `ts`) in the order `messages` uses — `(ts, rowid)` —
     /// so messages sharing `oldest`'s second are not skipped. Ascending order.
@@ -539,6 +565,18 @@ fn status_to_str(status: MessageStatus) -> anyhow::Result<String> {
 
 fn status_from_str(s: &str) -> anyhow::Result<MessageStatus> {
     serde_json::from_str(s).with_context(|| format!("bad status {s:?}"))
+}
+
+/// Escapes `%`, `_` and `\` for a `LIKE … ESCAPE '\'` pattern.
+fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Additive upgrades for databases created before a column existed.
@@ -1055,6 +1093,63 @@ mod tests {
             s.chat(&direct()).unwrap().unwrap().last_preview.as_deref(),
             Some(crate::model::REVOKED_BY_ME)
         );
+    }
+
+    #[test]
+    fn search_matches_text_captions_and_file_names_only() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_message(&msg(
+            &direct(),
+            "A",
+            100,
+            false,
+            "Dinner at Luigi's tonight",
+        ))
+        .unwrap();
+        s.upsert_message(&msg(&direct(), "B", 200, false, "see you"))
+            .unwrap();
+        let media = MediaRef {
+            mime: "application/pdf".into(),
+            size: 1,
+            thumbnail: Some(vec![255, 216, 100]),
+            local_path: None,
+            download_token: vec![1, 2, 3],
+        };
+        let mut doc = msg(&direct(), "C", 300, false, "");
+        doc.content = MessageContent::Document {
+            file_name: "Dinner-menu.pdf".into(),
+            caption: Some("menu".into()),
+            media: media.clone(),
+        };
+        s.upsert_message(&doc).unwrap();
+        let mut img = msg(&direct(), "D", 400, true, "");
+        img.content = MessageContent::Image {
+            caption: Some("Luigi's terrace".into()),
+            media,
+        };
+        s.upsert_message(&img).unwrap();
+
+        let ids = |q: &str| -> Vec<String> {
+            s.search_messages(q, 50)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.id.0)
+                .collect()
+        };
+        assert_eq!(ids("dinner"), ["C", "A"], "newest first, case-insensitive");
+        assert_eq!(ids("luigi"), ["D", "A"]);
+        assert_eq!(ids("menu"), ["C"]);
+        assert!(ids("Text").is_empty(), "JSON keys must not match");
+        assert!(ids("255").is_empty(), "thumbnail bytes must not match");
+        assert!(ids("mime").is_empty());
+        assert!(ids("  ").is_empty());
+        assert_eq!(ids("100%"), Vec::<String>::new(), "wildcards are literal");
+        assert_eq!(s.search_messages("e", 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn like_escape_quotes_wildcards() {
+        assert_eq!(like_escape("a%b_c\\d"), "a\\%b\\_c\\\\d");
     }
 
     #[test]

@@ -275,6 +275,7 @@ fn messages<'a>(app: &'a App, conv: &'a Conversation) -> Element<'a, Message> {
                 .as_ref()
                 .map(|q| conv.sender_label(&q.sender, own)),
             saved: app.saved_media.get(&msg.id).map(PathBuf::as_path),
+            highlighted: app.highlight.as_ref() == Some(&msg.id),
         };
         column = column.push(bubble::view(msg, ctx));
         prev = Some(msg);

@@ -48,6 +48,8 @@ pub struct BubbleCtx<'a> {
     pub quote_sender: Option<String>,
     /// Where this message's media was saved to, if the user saved it.
     pub saved: Option<&'a std::path::Path>,
+    /// Outlined in the accent colour (a search result that was jumped to).
+    pub highlighted: bool,
 }
 
 pub fn view<'a>(msg: &'a wa_core::Message, ctx: BubbleCtx<'a>) -> Element<'a, Message> {
@@ -126,7 +128,7 @@ pub fn view<'a>(msg: &'a wa_core::Message, ctx: BubbleCtx<'a>) -> Element<'a, Me
         container(body)
             .padding([space.space_xs, space.space_s])
             .max_width(MAX_BUBBLE_WIDTH)
-            .class(bubble_class(outgoing))
+            .class(bubble_class(outgoing, ctx.highlighted))
             .into()
     };
 
@@ -401,7 +403,7 @@ fn context_menu<'a>(msg: &'a wa_core::Message) -> Element<'a, Message> {
 }
 
 /// Rounded bubble; the corner nearest the sender is tighter, like a tail.
-fn bubble_class(outgoing: bool) -> theme::Container<'static> {
+fn bubble_class(outgoing: bool, highlighted: bool) -> theme::Container<'static> {
     theme::Container::custom(move |theme| {
         let cosmic = theme.cosmic();
         let big = cosmic.corner_radii.radius_l[0].max(12.0);
@@ -432,7 +434,8 @@ fn bubble_class(outgoing: bool) -> theme::Container<'static> {
             icon_color: Some(fg),
             border: Border {
                 radius: radius.into(),
-                ..Border::default()
+                width: if highlighted { 2.0 } else { 0.0 },
+                color: cosmic.accent_color().into(),
             },
             shadow: Shadow {
                 color: Color {
