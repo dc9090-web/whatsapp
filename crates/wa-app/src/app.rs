@@ -19,6 +19,7 @@ use crate::config::{Appearance, Config};
 use crate::desktop::{self, DesktopEvent, TrayHandle};
 use crate::pages::conversation::{self, Conversation, PAGE_SIZE};
 use crate::pages::{self, Page};
+use crate::signals;
 use crate::widgets::media::{self, MAX_INLINE, Thumb};
 use crate::widgets::reactions::ALL_EMOJIS;
 
@@ -1069,6 +1070,7 @@ impl Application for App {
             desktop::subscription().map(Message::Desktop),
             audio::subscription().map(Message::Audio),
             window::close_requests().map(Message::CloseRequested),
+            signals::subscription().map(|()| Message::Quit),
             cosmic::iced::event::listen_with(|event, _status, id| match event {
                 cosmic::iced::Event::Window(window::Event::Focused) => {
                     Some(Message::WindowFocused(id))

@@ -19,7 +19,7 @@ wa-core.workspace = true
 wa-desktop.workspace = true
 anyhow.workspace = true
 serde.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 tracing.workspace = true
 libcosmic.workspace = true
 # Must match the version cosmic-text uses (its `Fallback` trait takes `Script`).

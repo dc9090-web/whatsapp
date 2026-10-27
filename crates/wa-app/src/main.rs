@@ -11,6 +11,7 @@ mod config;
 mod desktop;
 mod fonts;
 mod pages;
+mod signals;
 mod widgets;
 
 use std::path::PathBuf;
