@@ -122,10 +122,7 @@ pub fn view<'a>(msg: &'a wa_core::Message, ctx: BubbleCtx<'a>) -> Element<'a, Me
             .into()
     };
 
-    let bubble = mouse_area(bubble)
-        .on_right_press(Message::OpenMessageMenu(msg.id.clone()))
-        .on_enter(Message::Hover(Some(msg.id.clone())))
-        .on_exit(Message::Hover(None));
+    let bubble = mouse_area(bubble).on_right_press(Message::OpenMessageMenu(msg.id.clone()));
 
     let bubble: Element<'a, Message> = if ctx.menu_open {
         popover(bubble)
@@ -158,18 +155,28 @@ pub fn view<'a>(msg: &'a wa_core::Message, ctx: BubbleCtx<'a>) -> Element<'a, Me
         widget::Space::new().width(Length::Fixed(64.0)).into()
     };
 
-    let mut line = widget::row::with_capacity(3)
+    // Hover is tracked over the bubble *and* its action buttons together, so
+    // moving the pointer from the bubble onto Reply/React keeps them shown.
+    let group = widget::row::with_capacity(2)
         .spacing(space.space_xxs)
         .align_y(Alignment::Center);
+    let group = if outgoing {
+        group.push(actions).push(bubble)
+    } else {
+        group.push(bubble).push(actions)
+    };
+    let group = mouse_area(group)
+        .on_enter(Message::Hover(Some(msg.id.clone())))
+        .on_exit(Message::HoverEnd(msg.id.clone()));
+
+    let mut line = widget::row::with_capacity(2).align_y(Alignment::Center);
     if outgoing {
         line = line
             .push(widget::Space::new().width(Length::Fill))
-            .push(actions)
-            .push(bubble);
+            .push(group);
     } else {
         line = line
-            .push(bubble)
-            .push(actions)
+            .push(group)
             .push(widget::Space::new().width(Length::Fill));
     }
 
@@ -351,7 +358,8 @@ fn context_menu<'a>(msg: &'a wa_core::Message) -> Element<'a, Message> {
 
     container(menu)
         .padding(space.space_xxs)
-        .width(Length::Fixed(300.0))
+        // Wide enough for six colour emoji plus the "More reactions" button.
+        .width(Length::Fixed(340.0))
         .class(theme::Container::custom(|theme| {
             let cosmic = theme.cosmic();
             container::Style {

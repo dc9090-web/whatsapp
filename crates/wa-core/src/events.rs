@@ -8,12 +8,28 @@ use crate::model::{Chat, ChatId, MediaRef, Message, MessageId, MessageStatus, Re
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackendCommand {
     /// `local_id` is the optimistic id the runtime already stored as `Pending`.
-    SendText { chat: ChatId, text: String, reply_to: Option<MessageId>, local_id: MessageId },
+    SendText {
+        chat: ChatId,
+        text: String,
+        reply_to: Option<MessageId>,
+        local_id: MessageId,
+    },
     /// Empty `emoji` removes our reaction.
-    React { chat: ChatId, target: MessageId, emoji: String },
-    MarkRead { chat: ChatId, messages: Vec<MessageId> },
+    React {
+        chat: ChatId,
+        target: MessageId,
+        emoji: String,
+    },
+    MarkRead {
+        chat: ChatId,
+        messages: Vec<MessageId>,
+    },
     /// Download and decrypt the full media file of a stored message.
-    FetchMedia { chat: ChatId, message: MessageId, media: MediaRef },
+    FetchMedia {
+        chat: ChatId,
+        message: MessageId,
+        media: MediaRef,
+    },
     /// Unlink this device from the account.
     Logout,
     Shutdown,
@@ -33,7 +49,10 @@ pub enum ConnectionState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackendEvent {
     /// A pairing QR payload to render; replaced by the next `Qr` when it expires.
-    Qr { code: String, valid_for_secs: u64 },
+    Qr {
+        code: String,
+        valid_for_secs: u64,
+    },
     Paired,
     Connection(ConnectionState),
     /// The session is no longer valid (unlinked from the phone or via `Logout`).
@@ -43,12 +62,32 @@ pub enum BackendEvent {
     SyncDone,
     ChatUpserted(Chat),
     Message(Message),
-    MessageStatus { chat: ChatId, message: MessageId, status: MessageStatus },
+    MessageStatus {
+        chat: ChatId,
+        message: MessageId,
+        status: MessageStatus,
+    },
     /// The optimistic `local_id` was accepted by the server as `id`.
-    MessageSent { chat: ChatId, local_id: MessageId, id: MessageId },
-    SendFailed { chat: ChatId, local_id: MessageId, error: String },
+    MessageSent {
+        chat: ChatId,
+        local_id: MessageId,
+        id: MessageId,
+    },
+    SendFailed {
+        chat: ChatId,
+        local_id: MessageId,
+        error: String,
+    },
     Reaction(Reaction),
-    MediaReady { chat: ChatId, message: MessageId, path: PathBuf },
-    MediaFailed { chat: ChatId, message: MessageId, error: String },
+    MediaReady {
+        chat: ChatId,
+        message: MessageId,
+        path: PathBuf,
+    },
+    MediaFailed {
+        chat: ChatId,
+        message: MessageId,
+        error: String,
+    },
     Error(String),
 }

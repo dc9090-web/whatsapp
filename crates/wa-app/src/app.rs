@@ -77,6 +77,8 @@ pub enum Message {
     OpenEmojiPicker(MessageId),
     CopyText(String),
     Hover(Option<MessageId>),
+    /// The pointer left this message's bubble/actions area.
+    HoverEnd(MessageId),
     Retry(MessageId),
     ConversationScrolled(f32),
 
@@ -353,17 +355,17 @@ impl App {
                 .find(|m| m.from_me && !m.sender.is_empty())
                 .map(|m| m.sender.clone());
         }
-        // Stickers usually arrive without an inline thumbnail; they are small,
-        // so download them right away instead of showing a placeholder.
-        let stickers: Vec<MessageId> = conv
+        // Inline previews are tiny (stickers often have none), so download
+        // stickers and images right away instead of upscaling the preview.
+        let auto: Vec<MessageId> = conv
             .messages
             .iter()
-            .filter(|m| matches!(m.content, MessageContent::Sticker { .. }))
-            .filter(|m| !conv.thumbs.contains_key(&m.id))
+            .filter(|m| media::auto_download(&m.content))
+            .filter(|m| conv.thumbs.get(&m.id).is_none_or(|t| !t.full))
             .filter(|m| m.content.media().and_then(media::local_file).is_none())
             .map(|m| m.id.clone())
             .collect();
-        for id in stickers {
+        for id in auto {
             if !self.fetching.contains(&id) && !self.media_errors.contains_key(&id) {
                 self.request_media(&id);
             }
@@ -1241,6 +1243,14 @@ impl Application for App {
                 // Keep the hover target while its menu is open.
                 if self.menu_for.is_none() {
                     self.hovered = id;
+                }
+                Task::none()
+            }
+            Message::HoverEnd(id) => {
+                // Only clear our own hover: entering the next message may be
+                // delivered before leaving this one.
+                if self.menu_for.is_none() && self.hovered.as_ref() == Some(&id) {
+                    self.hovered = None;
                 }
                 Task::none()
             }

@@ -33,7 +33,10 @@ impl MessageId {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or_default();
-        Self(format!("local-{nanos}-{}", SEQ.fetch_add(1, Ordering::Relaxed)))
+        Self(format!(
+            "local-{nanos}-{}",
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ))
     }
 
     pub fn is_local(&self) -> bool {
@@ -95,13 +98,31 @@ pub struct QuotedMessage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MessageContent {
     Text(String),
-    Image { caption: Option<String>, media: MediaRef },
-    Sticker { media: MediaRef },
-    Audio { voice_note: bool, duration_secs: u32, media: MediaRef },
-    Video { caption: Option<String>, media: MediaRef },
-    Document { file_name: String, caption: Option<String>, media: MediaRef },
+    Image {
+        caption: Option<String>,
+        media: MediaRef,
+    },
+    Sticker {
+        media: MediaRef,
+    },
+    Audio {
+        voice_note: bool,
+        duration_secs: u32,
+        media: MediaRef,
+    },
+    Video {
+        caption: Option<String>,
+        media: MediaRef,
+    },
+    Document {
+        file_name: String,
+        caption: Option<String>,
+        media: MediaRef,
+    },
     /// Anything we cannot render (polls, call logs, ...). Never dropped silently.
-    Unsupported { kind: String },
+    Unsupported {
+        kind: String,
+    },
 }
 
 impl MessageContent {
@@ -111,7 +132,9 @@ impl MessageContent {
             Self::Text(t) => t.lines().next().unwrap_or_default().to_owned(),
             Self::Image { caption, .. } => with_caption("📷 Photo", caption),
             Self::Sticker { .. } => "Sticker".to_owned(),
-            Self::Audio { voice_note: true, .. } => "🎤 Voice message".to_owned(),
+            Self::Audio {
+                voice_note: true, ..
+            } => "🎤 Voice message".to_owned(),
             Self::Audio { .. } => "🎵 Audio".to_owned(),
             Self::Video { caption, .. } => with_caption("🎥 Video", caption),
             Self::Document { file_name, .. } => format!("📄 {file_name}"),

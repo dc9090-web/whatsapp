@@ -9,6 +9,7 @@ mod audio;
 mod backend_sub;
 mod config;
 mod desktop;
+mod fonts;
 mod pages;
 mod widgets;
 
@@ -145,6 +146,7 @@ fn main() -> std::process::ExitCode {
         config_handler,
         temp_dir,
     };
+    fonts::prefer_colour_emoji();
     match cosmic::app::run::<App>(settings, flags) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {

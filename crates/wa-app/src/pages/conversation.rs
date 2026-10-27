@@ -327,6 +327,9 @@ fn reply_banner<'a>(
     .into()
 }
 
+/// Height of the message text field, which the send button matches.
+const COMPOSER_HEIGHT: f32 = 48.0;
+
 fn composer(app: &App) -> Element<'_, Message> {
     let space = theme::spacing();
     let can_send = !app.composer.trim().is_empty() && app.commands.is_some();
@@ -336,8 +339,12 @@ fn composer(app: &App) -> Element<'_, Message> {
         .on_submit(|_| Message::SendComposer)
         .padding([space.space_xs, space.space_s])
         .width(Length::Fill);
+    // Same height as the text field (measured: 48 px including its border),
+    // rather than a size preset; `Length::Fill` collapses in a shrink row.
     let send = button::icon(icon::from_name("mail-send-symbolic"))
-        .medium()
+        .icon_size(20)
+        .padding([0, space.space_m])
+        .height(Length::Fixed(COMPOSER_HEIGHT))
         .class(theme::Button::Suggested)
         .on_press_maybe(can_send.then_some(Message::SendComposer));
     container(

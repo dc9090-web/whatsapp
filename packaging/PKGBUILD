@@ -7,7 +7,7 @@ pkgdesc="Unofficial native WhatsApp client for the COSMIC desktop"
 arch=('x86_64')
 license=('GPL-3.0-or-later')
 # libopus is linked statically (audiopus_sys); rodio/cpal link libasound.
-depends=(gcc-libs glibc libxkbcommon wayland alsa-lib)
+depends=(gcc-libs glibc libxkbcommon wayland alsa-lib noto-fonts-emoji)
 makedepends=(rust cargo git just cmake)
 provides=("$_pkgname")
 conflicts=("$_pkgname")

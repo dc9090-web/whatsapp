@@ -14,6 +14,18 @@ use crate::app::Message;
 pub const MAX_INLINE: f32 = 280.0;
 pub const STICKER_SIZE: f32 = 160.0;
 
+/// Images up to this size download as soon as their chat is shown.
+pub const AUTO_DOWNLOAD_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Whether `content` is fetched automatically rather than on click.
+pub fn auto_download(content: &MessageContent) -> bool {
+    match content {
+        MessageContent::Sticker { .. } => true,
+        MessageContent::Image { media, .. } => media.size <= AUTO_DOWNLOAD_MAX_BYTES,
+        _ => false,
+    }
+}
+
 /// A decoded, display-ready thumbnail.
 #[derive(Debug, Clone)]
 pub struct Thumb {
@@ -35,12 +47,25 @@ pub fn decode_thumb(media: &MediaRef, max_px: u32) -> Option<Thumb> {
     }
     let bytes = media.thumbnail.as_deref()?;
     match image::load_from_memory(bytes) {
-        Ok(img) => Some(to_thumb(img, max_px, false)),
+        Ok(img) => Some(to_thumb(soften_preview(img, max_px), max_px, false)),
         Err(err) => {
             tracing::debug!(?err, "cannot decode inline thumbnail");
             None
         }
     }
+}
+
+/// Inline previews are ~100 px. Shown at bubble size they turn blocky, so
+/// upscale smoothly and blur them into an intentional "loading" look until
+/// the full image arrives.
+fn soften_preview(img: image::DynamicImage, max_px: u32) -> image::DynamicImage {
+    let target = (max_px / 2).max(1);
+    if img.width().max(img.height()) >= target {
+        return img;
+    }
+    let up = img.resize(target, target, image::imageops::FilterType::Triangle);
+    let sigma = up.width().max(up.height()) as f32 / 60.0;
+    up.blur(sigma.max(1.0))
 }
 
 fn to_thumb(img: image::DynamicImage, max_px: u32, full: bool) -> Thumb {
@@ -330,6 +355,42 @@ pub fn local_file(media: &MediaRef) -> Option<&Path> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn small_images_and_stickers_auto_download() {
+        let media = |size| wa_core::MediaRef {
+            mime: "image/jpeg".into(),
+            size,
+            thumbnail: None,
+            local_path: None,
+            download_token: Vec::new(),
+        };
+        let image = |size| wa_core::MessageContent::Image {
+            caption: None,
+            media: media(size),
+        };
+        assert!(super::auto_download(&image(2_000_000)));
+        assert!(!super::auto_download(&image(
+            super::AUTO_DOWNLOAD_MAX_BYTES + 1
+        )));
+        assert!(super::auto_download(&wa_core::MessageContent::Sticker {
+            media: media(40_000)
+        }));
+        assert!(!super::auto_download(&wa_core::MessageContent::Document {
+            file_name: "a.pdf".into(),
+            caption: None,
+            media: media(10),
+        }));
+    }
+
+    #[test]
+    fn tiny_previews_are_upscaled_not_left_blocky() {
+        let tiny = image::DynamicImage::new_rgb8(72, 54);
+        let soft = super::soften_preview(tiny, 560);
+        assert_eq!(soft.width(), 280);
+        let big = image::DynamicImage::new_rgb8(400, 300);
+        assert_eq!(super::soften_preview(big, 560).width(), 400);
+    }
+
     use super::*;
 
     #[test]
@@ -364,7 +425,8 @@ mod tests {
             download_token: vec![],
         };
         let thumb = decode_thumb(&media, 280).unwrap();
-        assert_eq!((thumb.width, thumb.height), (8, 4));
+        // Tiny inline previews are smoothly upscaled to half the decode size.
+        assert_eq!((thumb.width, thumb.height), (140, 70));
         assert!(!thumb.full);
     }
 }

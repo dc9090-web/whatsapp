@@ -266,7 +266,12 @@ pub fn tray_pixmap(count: u32, size: usize) -> Vec<u8> {
                 }
                 for sy in 0..scale {
                     for sx in 0..scale {
-                        put(&mut buf, gx + col * scale + sx, y0 + row * scale + sy, WHITE);
+                        put(
+                            &mut buf,
+                            gx + col * scale + sx,
+                            y0 + row * scale + sy,
+                            WHITE,
+                        );
                     }
                 }
             }
