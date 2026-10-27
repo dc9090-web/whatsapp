@@ -1,6 +1,7 @@
 //! The open conversation (right pane): header, messages, reply banner, composer.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use chrono::{DateTime, Datelike, Local};
 use cosmic::iced::widget::text::Wrapping;
@@ -185,7 +186,12 @@ fn header<'a>(app: &'a App, conv: &'a Conversation) -> Element<'a, Message> {
         );
     }
     row = row
-        .push(widgets::avatar(&conv.chat.name, &conv.chat.id.0, 40.0))
+        .push(widgets::avatar(
+            &conv.chat.name,
+            &conv.chat.id.0,
+            40.0,
+            app.avatars.get(&conv.chat.id).map(PathBuf::as_path),
+        ))
         .push(
             widget::column::with_capacity(2)
                 .width(Length::Fill)
@@ -264,6 +270,7 @@ fn messages<'a>(app: &'a App, conv: &'a Conversation) -> Element<'a, Message> {
                 .reply_to
                 .as_ref()
                 .map(|q| conv.sender_label(&q.sender, own)),
+            saved: app.saved_media.get(&msg.id).map(PathBuf::as_path),
         };
         column = column.push(bubble::view(msg, ctx));
         prev = Some(msg);

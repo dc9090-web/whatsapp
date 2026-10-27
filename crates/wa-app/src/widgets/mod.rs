@@ -18,10 +18,27 @@ const SEND_GREEN_HOVER: Color = Color::from_rgb(0.02, 0.76, 0.60);
 /// Reply arrow. The Cosmic icon theme has no `mail-reply-sender-symbolic`,
 /// and the fallback theme's renders badly, so the icon is embedded.
 pub fn reply_icon() -> widget::icon::Handle {
-    const SVG: &[u8] = include_bytes!("../../assets/reply-symbolic.svg");
-    let mut handle = widget::icon::from_svg_bytes(SVG);
-    handle.symbolic = true;
-    handle
+    embedded_icon(include_bytes!("../../assets/reply-symbolic.svg"))
+}
+
+/// Delivery-status icon for an outgoing message.
+pub fn status_icon(status: wa_core::MessageStatus) -> Option<widget::icon::Handle> {
+    use wa_core::MessageStatus::*;
+    let svg: &'static [u8] = match status {
+        Pending => include_bytes!("../../assets/status-pending.svg"),
+        Sent => include_bytes!("../../assets/tick-sent.svg"),
+        Delivered | Read => include_bytes!("../../assets/tick-double.svg"),
+        Failed => include_bytes!("../../assets/status-failed.svg"),
+        Received => return None,
+    };
+    Some(embedded_icon(svg))
+}
+
+/// Tints an embedded symbolic icon.
+pub fn icon_tint(color: impl Fn(&cosmic::Theme) -> Color + 'static) -> theme::Svg {
+    theme::Svg::custom(move |theme| cosmic::iced::widget::svg::Style {
+        color: Some(color(theme)),
+    })
 }
 
 /// Round send button: green when there is something to send, else quiet.
@@ -102,8 +119,33 @@ pub fn initials(name: &str) -> String {
     }
 }
 
-/// A round avatar with initials.
-pub fn avatar<'a, M: 'a>(name: &str, seed: &str, size: f32) -> Element<'a, M> {
+/// Embedded symbolic icon (recoloured by the theme like a themed icon).
+fn embedded_icon(svg: &'static [u8]) -> widget::icon::Handle {
+    let mut handle = widget::icon::from_svg_bytes(svg);
+    handle.symbolic = true;
+    handle
+}
+
+/// Download arrow for "Save to Downloads".
+pub fn download_icon() -> widget::icon::Handle {
+    embedded_icon(include_bytes!("../../assets/download-symbolic.svg"))
+}
+
+/// A round avatar: the profile picture when we have one, else initials.
+pub fn avatar<'a, M: 'a>(
+    name: &str,
+    seed: &str,
+    size: f32,
+    picture: Option<&std::path::Path>,
+) -> Element<'a, M> {
+    if let Some(path) = picture {
+        return widget::image(widget::image::Handle::from_path(path))
+            .width(Length::Fixed(size))
+            .height(Length::Fixed(size))
+            .content_fit(cosmic::iced::ContentFit::Cover)
+            .border_radius([size / 2.0; 4])
+            .into();
+    }
     let bg = avatar_color(seed);
     let label = widget::text(initials(name))
         .size(size * 0.4)

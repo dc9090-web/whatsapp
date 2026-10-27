@@ -20,12 +20,14 @@ pub const MAX_BUBBLE_WIDTH: f32 = 520.0;
 const OUTGOING_TINT: f32 = 0.34;
 
 /// Delivery glyph for the bubble footer (empty for incoming messages).
-pub fn status_glyph(status: MessageStatus) -> &'static str {
+/// Tooltip for the delivery-status icon; empty for incoming messages.
+pub fn status_label(status: MessageStatus) -> &'static str {
     match status {
-        MessageStatus::Pending => "◷",
-        MessageStatus::Sent => "✓",
-        MessageStatus::Delivered | MessageStatus::Read => "✓✓",
-        MessageStatus::Failed => "!",
+        MessageStatus::Pending => "Sending…",
+        MessageStatus::Sent => "Sent",
+        MessageStatus::Delivered => "Delivered",
+        MessageStatus::Read => "Read",
+        MessageStatus::Failed => "Not sent",
         MessageStatus::Received => "",
     }
 }
@@ -44,6 +46,8 @@ pub struct BubbleCtx<'a> {
     pub menu_open: bool,
     /// Display name for the quoted message's sender.
     pub quote_sender: Option<String>,
+    /// Where this message's media was saved to, if the user saved it.
+    pub saved: Option<&'a std::path::Path>,
 }
 
 pub fn view<'a>(msg: &'a wa_core::Message, ctx: BubbleCtx<'a>) -> Element<'a, Message> {
@@ -75,6 +79,7 @@ pub fn view<'a>(msg: &'a wa_core::Message, ctx: BubbleCtx<'a>) -> Element<'a, Me
             error: ctx.media_error,
             playing: ctx.playing,
             outgoing,
+            saved: ctx.saved,
         },
     ) {
         body = body.push(media);
@@ -221,20 +226,19 @@ fn footer<'a>(msg: &'a wa_core::Message, time: &str, outgoing: bool) -> Element<
         .spacing(space.space_xxs)
         .align_y(Alignment::Center)
         .push(time);
-    if outgoing {
-        let glyph = status_glyph(msg.status);
-        if !glyph.is_empty() {
-            let class = match msg.status {
-                MessageStatus::Read => theme::Text::Custom(super::accent_text),
-                MessageStatus::Failed => theme::Text::Custom(destructive_text),
-                _ => theme::Text::Custom(super::dim_text),
-            };
-            let mut text = widget::text::caption(glyph).class(class);
-            if matches!(msg.status, MessageStatus::Read | MessageStatus::Failed) {
-                text = text.font(cosmic::font::bold());
+    if outgoing && let Some(handle) = super::status_icon(msg.status) {
+        // Read ticks take the accent; the rest stay quiet.
+        let tint = match msg.status {
+            MessageStatus::Read => super::icon_tint(|t| t.cosmic().accent_text_color().into()),
+            MessageStatus::Failed => {
+                super::icon_tint(|t| t.cosmic().destructive_text_color().into())
             }
-            row = row.push(text);
-        }
+            _ => super::icon_tint(|t| with_alpha(t.cosmic().on_bg_color().into(), 0.62)),
+        };
+        row = row.push(with_tooltip(
+            icon::icon(handle).size(16).class(tint),
+            status_label(msg.status),
+        ));
     }
     row.width(Length::Shrink).into()
 }
@@ -449,11 +453,19 @@ mod tests {
 
     #[test]
     fn status_glyphs() {
-        assert_eq!(status_glyph(MessageStatus::Pending), "◷");
-        assert_eq!(status_glyph(MessageStatus::Sent), "✓");
-        assert_eq!(status_glyph(MessageStatus::Delivered), "✓✓");
-        assert_eq!(status_glyph(MessageStatus::Read), "✓✓");
-        assert_eq!(status_glyph(MessageStatus::Failed), "!");
-        assert_eq!(status_glyph(MessageStatus::Received), "");
+        assert_eq!(status_label(MessageStatus::Pending), "Sending…");
+        assert_eq!(status_label(MessageStatus::Sent), "Sent");
+        assert_eq!(status_label(MessageStatus::Delivered), "Delivered");
+        assert_eq!(status_label(MessageStatus::Read), "Read");
+        assert_eq!(status_label(MessageStatus::Failed), "Not sent");
+        assert_eq!(status_label(MessageStatus::Received), "");
+        for status in [
+            MessageStatus::Pending,
+            MessageStatus::Sent,
+            MessageStatus::Read,
+        ] {
+            assert!(super::super::status_icon(status).is_some());
+        }
+        assert!(super::super::status_icon(MessageStatus::Received).is_none());
     }
 }

@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 
-use whatsapp_rust::Jid;
 use whatsapp_rust::proto_helpers::MessageExt;
 use whatsapp_rust::types::message::{MessageInfo, MessageSource};
 use whatsapp_rust::wacore::types::presence::ReceiptType;
@@ -13,6 +12,7 @@ use whatsapp_rust::wacore_binary::JidExt;
 use whatsapp_rust::waproto::buffa::MessageField;
 use whatsapp_rust::waproto::codec;
 use whatsapp_rust::waproto::whatsapp as wa;
+use whatsapp_rust::{GroupProfilePicture, Jid};
 
 use crate::backend::fake::OWN_REACTION_SENDER;
 use crate::events::BackendEvent;
@@ -614,6 +614,38 @@ pub fn media_file_name(payload: &MediaPayload, mime: &str, message_id: &str) -> 
         _ => sanitize(message_id),
     };
     format!("{stem}.{}", extension_for(mime, payload.file_name()))
+}
+
+/// Which server queries resolve a chat's profile picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvatarRoute {
+    /// The per-JID `w:profile:picture` IQ only.
+    Contact,
+    /// The per-JID IQ first; if that errors or yields nothing, the batch
+    /// group-picture query (`w:g2`).
+    GroupWithFallback,
+}
+
+pub fn avatar_route(jid: &Jid) -> AvatarRoute {
+    if jid.is_group() {
+        AvatarRoute::GroupWithFallback
+    } else {
+        AvatarRoute::Contact
+    }
+}
+
+/// `avatar-<user part of the chat JID, file-system safe>.jpg` inside the
+/// media cache. Previews are always JPEG.
+pub fn avatar_file_name(chat: &ChatId) -> String {
+    format!("avatar-{}.jpg", sanitize(chat.user()))
+}
+
+/// The non-empty picture URL the batch group query returned for `group`.
+pub fn group_picture_url(pics: &[GroupProfilePicture], group: &Jid) -> Option<String> {
+    pics.iter()
+        .filter(|p| p.group_jid.user_base() == group.user_base())
+        .filter_map(|p| p.url.clone())
+        .find(|u| !u.is_empty())
 }
 
 /// Receipt type → outgoing message status (`None` = not a status change we track).
@@ -1485,6 +1517,74 @@ mod tests {
         );
         assert_eq!(extension_for("audio/ogg; codecs=opus", None), "ogg");
         assert_eq!(extension_for("weird/type", None), "bin");
+    }
+
+    #[test]
+    fn avatar_file_names_are_safe() {
+        assert_eq!(
+            avatar_file_name(&ChatId("15551234567@s.whatsapp.net".into())),
+            "avatar-15551234567.jpg"
+        );
+        assert_eq!(
+            avatar_file_name(&ChatId("120363001122334455@g.us".into())),
+            "avatar-120363001122334455.jpg"
+        );
+        // Legacy group ids keep their dash; anything else is replaced.
+        assert_eq!(
+            avatar_file_name(&ChatId("1555-1234@g.us".into())),
+            "avatar-1555-1234.jpg"
+        );
+        assert_eq!(
+            avatar_file_name(&ChatId("../x@s.whatsapp.net".into())),
+            "avatar-___x.jpg"
+        );
+        assert_eq!(
+            avatar_file_name(&ChatId("@g.us".into())),
+            "avatar-media.jpg"
+        );
+    }
+
+    #[test]
+    fn avatar_routes_by_server() {
+        assert_eq!(
+            avatar_route(&jid("15551234567@s.whatsapp.net")),
+            AvatarRoute::Contact
+        );
+        assert_eq!(avatar_route(&jid("123@lid")), AvatarRoute::Contact);
+        assert_eq!(
+            avatar_route(&jid("120363001122334455@g.us")),
+            AvatarRoute::GroupWithFallback
+        );
+    }
+
+    #[test]
+    fn group_picture_url_matches_the_group() {
+        let g = jid("120363001122334455@g.us");
+        let pic = |user: &str, url: Option<&str>| GroupProfilePicture {
+            group_jid: jid(&format!("{user}@g.us")),
+            url: url.map(str::to_owned),
+            direct_path: None,
+            photo_id: None,
+        };
+        assert_eq!(group_picture_url(&[], &g), None);
+        assert_eq!(
+            group_picture_url(&[pic("120363001122334455", None)], &g),
+            None
+        );
+        assert_eq!(
+            group_picture_url(&[pic("120363001122334455", Some(""))], &g),
+            None
+        );
+        assert_eq!(
+            group_picture_url(
+                &[
+                    pic("999", Some("https://example.com/other.jpg")),
+                    pic("120363001122334455", Some("https://example.com/pic.jpg")),
+                ],
+                &g
+            ),
+            Some("https://example.com/pic.jpg".to_owned())
+        );
     }
 
     #[test]

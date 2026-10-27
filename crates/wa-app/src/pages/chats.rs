@@ -97,7 +97,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .padding([space.space_xxs, space.space_xs]);
         for chat in &app.chats {
             let selected = app.selected.as_ref() == Some(&chat.id);
-            column = column.push(row(chat, selected, now));
+            let picture = app.avatars.get(&chat.id).map(std::path::PathBuf::as_path);
+            column = column.push(row(chat, selected, now, picture));
         }
         widget::scrollable(column).height(Length::Fill).into()
     };
@@ -110,7 +111,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-fn row(chat: &Chat, selected: bool, now: DateTime<Local>) -> Element<'_, Message> {
+fn row<'a>(
+    chat: &'a Chat,
+    selected: bool,
+    now: DateTime<Local>,
+    picture: Option<&'a std::path::Path>,
+) -> Element<'a, Message> {
     let space = theme::spacing();
     let time = if chat.last_activity > 0 {
         format_time(chat.last_activity, now)
@@ -158,7 +164,7 @@ fn row(chat: &Chat, selected: bool, now: DateTime<Local>) -> Element<'_, Message
     let content = widget::row::with_capacity(2)
         .spacing(space.space_s)
         .align_y(Alignment::Center)
-        .push(widgets::avatar(&chat.name, &chat.id.0, 44.0))
+        .push(widgets::avatar(&chat.name, &chat.id.0, 44.0, picture))
         .push(
             widget::column::with_capacity(2)
                 .spacing(space.space_xxxs)

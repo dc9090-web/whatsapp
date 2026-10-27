@@ -20,16 +20,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use tokio::sync::mpsc;
-use whatsapp_rust::Jid;
+use tokio::sync::{Semaphore, mpsc};
 use whatsapp_rust::bot::{Bot, BotHandle};
 use whatsapp_rust::download::Downloadable;
+use whatsapp_rust::http::HttpRequest;
 use whatsapp_rust::prelude::{MessageBuilderExt, SqliteStore};
 use whatsapp_rust::types::events::{Event, EventHandler};
 use whatsapp_rust::wacore::store::DevicePropsOverride;
 use whatsapp_rust::waproto::codec;
 use whatsapp_rust::waproto::whatsapp as wa;
 use whatsapp_rust::{Client, proto_helpers};
+use whatsapp_rust::{ErrorChainExt as _, Jid, PictureType};
 
 use self::convert::{Converted, KeyRecord, LidMap, MediaPayload};
 use self::index::Index;
@@ -63,6 +64,9 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(4);
 /// After the stream was replaced (or the client rejected), try again this
 /// late rather than staying disconnected until a restart.
 const STOPPED_RETRY: Duration = Duration::from_secs(300);
+/// Profile-picture lookups in flight at once, so a long chat list does not
+/// fire hundreds of IQs at the server in one go.
+const MAX_AVATAR_DOWNLOADS: usize = 3;
 
 /// Why a session ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +94,8 @@ struct Shared {
     media_dir: PathBuf,
     /// Dedupes `LoggedOut` (whatsapp-rust dispatches one on `logout()` too).
     logged_out_sent: AtomicBool,
+    /// Caps concurrent `FetchAvatar` lookups at [`MAX_AVATAR_DOWNLOADS`].
+    avatar_slots: Semaphore,
 }
 
 impl Shared {
@@ -238,6 +244,7 @@ impl WhatsAppBackend for WhatsAppRustBackend {
             lids: Mutex::new(lids),
             media_dir: self.media_dir.clone(),
             logged_out_sent: AtomicBool::new(false),
+            avatar_slots: Semaphore::new(MAX_AVATAR_DOWNLOADS),
         });
         if let Some(w) = warning {
             shared.emit(BackendEvent::Error(w)).await;
@@ -644,8 +651,27 @@ async fn handle_command(shared: &Arc<Shared>, client: &Arc<Client>, cmd: Backend
             });
         }
         BackendCommand::FetchAvatar { chat } => {
-            // TODO(avatars): look the picture up and download it; see FetchMedia.
-            shared.emit(BackendEvent::AvatarMissing { chat }).await;
+            let shared = Arc::clone(shared);
+            let client = Arc::clone(client);
+            tokio::spawn(async move {
+                let ev = {
+                    // Held until the download finished; `Err` only if the
+                    // semaphore was closed, which it never is.
+                    let _slot = shared.avatar_slots.acquire().await;
+                    match fetch_avatar(&shared.media_dir, &client, &chat).await {
+                        Ok(Some(path)) => BackendEvent::AvatarReady { chat, path },
+                        Ok(None) => {
+                            tracing::debug!("no profile picture for {}", chat.0);
+                            BackendEvent::AvatarMissing { chat }
+                        }
+                        Err(e) => {
+                            log_avatar_failure(&chat, &e);
+                            BackendEvent::AvatarMissing { chat }
+                        }
+                    }
+                };
+                shared.emit(ev).await;
+            });
         }
         // Handled by the session loop.
         BackendCommand::Logout | BackendCommand::Shutdown => {}
@@ -807,6 +833,84 @@ async fn fetch_media(
     }
     tokio::fs::rename(&tmp, &target).await?;
     Ok(target)
+}
+
+/// Looks a chat's preview profile picture up and caches it under
+/// `media_dir`. `Ok(None)` means the chat has no picture (or we may not see
+/// it); the picture is re-fetched on every call so a changed one shows up.
+async fn fetch_avatar(
+    media_dir: &Path,
+    client: &Arc<Client>,
+    chat: &ChatId,
+) -> anyhow::Result<Option<PathBuf>> {
+    let jid = parse_jid(chat)?;
+    let Some(url) = lookup_avatar_url(client, &jid).await? else {
+        return Ok(None);
+    };
+    // A plain CDN URL: no media key, nothing to decrypt. whatsapp-rust's own
+    // HTTP client already does the blocking I/O on a blocking thread.
+    let response = client
+        .http_client
+        .execute(HttpRequest::get(url))
+        .await
+        .map_err(|e| anyhow::anyhow!("avatar download failed: {e:#}"))?;
+    if response.status_code != 200 {
+        anyhow::bail!("avatar download returned HTTP {}", response.status_code);
+    }
+    if response.body.is_empty() {
+        anyhow::bail!("avatar download returned an empty body");
+    }
+    tokio::fs::create_dir_all(media_dir).await?;
+    let target = media_dir.join(convert::avatar_file_name(chat));
+    // Write-then-rename so a reader never sees a half-written picture.
+    let tmp = target.with_extension("part");
+    if let Err(e) = tokio::fs::write(&tmp, &response.body).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e.into());
+    }
+    tokio::fs::rename(&tmp, &target).await?;
+    Ok(Some(target))
+}
+
+/// The preview picture URL for `jid`, per [`convert::avatar_route`].
+async fn lookup_avatar_url(client: &Arc<Client>, jid: &Jid) -> anyhow::Result<Option<String>> {
+    let route = convert::avatar_route(jid);
+    match client.contacts().get_profile_picture(jid, true).await {
+        Ok(Some(pic)) if !pic.url.is_empty() => return Ok(Some(pic.url)),
+        Ok(_) if route == convert::AvatarRoute::Contact => return Ok(None),
+        Err(e) if route == convert::AvatarRoute::Contact => return Err(e.into()),
+        Ok(_) => tracing::debug!("no picture for group {jid} via profile IQ; trying group query"),
+        Err(e) => {
+            tracing::debug!("profile IQ failed for group {jid}: {e:#}; trying group query")
+        }
+    }
+    let pics = client
+        .groups()
+        .get_profile_pictures(vec![jid.clone()], PictureType::Preview)
+        .await?;
+    Ok(convert::group_picture_url(&pics, jid))
+}
+
+/// Avatars are decorative: a failure is only ever a log line. Rate limits
+/// are called out so a flood of them is recognisable.
+fn log_avatar_failure(chat: &ChatId, e: &anyhow::Error) {
+    let chain: &(dyn std::error::Error + Send + Sync + 'static) = e.as_ref();
+    match chain.server_rejection() {
+        Some(r) if r.code == 429 => {
+            tracing::warn!(
+                "profile picture lookup for {} rate-limited by the server (backoff {:?}s)",
+                chat.0,
+                r.backoff
+            );
+        }
+        Some(r) => tracing::debug!(
+            "profile picture lookup for {} rejected: {} {}",
+            chat.0,
+            r.code,
+            r.text
+        ),
+        None => tracing::warn!("profile picture for {} failed: {e:#}", chat.0),
+    }
 }
 
 /// Translates bus events into `BackendEvent`s, in order.
@@ -1282,6 +1386,7 @@ mod tests {
             lids: Mutex::new(LidMap::new()),
             media_dir: PathBuf::from("/nonexistent"),
             logged_out_sent: AtomicBool::new(false),
+            avatar_slots: Semaphore::new(MAX_AVATAR_DOWNLOADS),
         };
         let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
         let chat = ChatId("1@s.whatsapp.net".into());
@@ -1323,6 +1428,7 @@ mod tests {
             lids: Mutex::new(LidMap::new()),
             media_dir: PathBuf::from("/nonexistent"),
             logged_out_sent: AtomicBool::new(false),
+            avatar_slots: Semaphore::new(MAX_AVATAR_DOWNLOADS),
         };
         shared.emit_logged_out().await;
         shared.emit_logged_out().await;
@@ -1341,6 +1447,7 @@ mod tests {
             lids: Mutex::new(LidMap::new()),
             media_dir: PathBuf::from("/nonexistent"),
             logged_out_sent: AtomicBool::new(false),
+            avatar_slots: Semaphore::new(MAX_AVATAR_DOWNLOADS),
         };
         let chat = ChatId("15551234567@s.whatsapp.net".into());
         shared.update_name(&chat, "Alice", convert::RANK_PUSH).await;

@@ -85,6 +85,9 @@ pub enum Message {
 
     OpenMedia(MessageId),
     FetchMedia(MessageId),
+    /// Copy a message's media into the Downloads folder (fetching it first).
+    SaveMedia(MessageId),
+    MediaSaved(MessageId, Result<PathBuf, String>),
     ToggleVoice(MessageId),
     OpenFile(PathBuf),
     CloseDialog,
@@ -136,6 +139,14 @@ pub struct App {
     pub media_errors: HashMap<MessageId, String>,
     /// Media to show/open as soon as its download finishes.
     pub open_after_fetch: HashSet<MessageId>,
+    /// Media to copy into Downloads once its download finishes.
+    pub save_after_fetch: HashSet<MessageId>,
+    /// Where media was saved this session (shown under the message).
+    pub saved_media: HashMap<MessageId, PathBuf>,
+    /// Downloaded profile pictures by chat.
+    pub avatars: HashMap<ChatId, PathBuf>,
+    /// Chats whose picture was already requested this session.
+    pub avatars_requested: HashSet<ChatId>,
     pub play_after_fetch: Option<MessageId>,
     pub audio: Option<AudioHandle>,
     pub playing: Option<MessageId>,
@@ -238,6 +249,10 @@ impl App {
             fetching: HashSet::new(),
             media_errors: HashMap::new(),
             open_after_fetch: HashSet::new(),
+            save_after_fetch: HashSet::new(),
+            saved_media: HashMap::new(),
+            avatars: HashMap::new(),
+            avatars_requested: HashSet::new(),
             play_after_fetch: None,
             audio: None,
             playing: None,
@@ -283,10 +298,16 @@ impl App {
         };
         let chats = store.chats();
         let total = store.total_unread();
+        let avatars = store.chat_avatars();
         match chats {
             Ok(chats) => self.chats = chats,
             Err(err) => self.store_error("Failed to load chats", err),
         }
+        match avatars {
+            Ok(avatars) => self.avatars = avatars,
+            Err(err) => tracing::error!(?err, "failed to load profile pictures"),
+        }
+        self.request_avatars();
         let total = match total {
             Ok(total) => total,
             Err(err) => {
@@ -300,6 +321,47 @@ impl App {
             conv.chat = chat.clone();
         }
         self.set_total_unread(total)
+    }
+
+    /// Asks the backend for pictures of chats that have none yet, most
+    /// recent first and a bounded number per reload.
+    fn request_avatars(&mut self) {
+        const PER_RELOAD: usize = 40;
+        if self.commands.is_none() || self.page != Page::Main {
+            return;
+        }
+        let wanted: Vec<ChatId> = self
+            .chats
+            .iter()
+            .map(|c| c.id.clone())
+            .filter(|id| !self.avatars.contains_key(id) && !self.avatars_requested.contains(id))
+            .take(PER_RELOAD)
+            .collect();
+        for chat in wanted {
+            if self.send(BackendCommand::FetchAvatar { chat: chat.clone() }) {
+                self.avatars_requested.insert(chat);
+            }
+        }
+    }
+
+    /// Copies a message's local media into Downloads on a blocking thread.
+    fn save_media(&mut self, id: &MessageId) -> Task<Message> {
+        let Some(msg) = self.find_message(id) else {
+            return Task::none();
+        };
+        let Some(local) = msg.content.media().and_then(media::local_file) else {
+            return Task::none();
+        };
+        let name = media::save_name(&msg.content, local, msg.timestamp);
+        let source = local.to_path_buf();
+        let id = id.clone();
+        cosmic::task::future(async move {
+            let result =
+                tokio::task::spawn_blocking(move || media::save_to_downloads(&source, &name))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+            Message::MediaSaved(id, result)
+        })
     }
 
     /// Updates the cached unread total and the tray badge when it changed.
@@ -751,6 +813,9 @@ impl App {
                 if self.open_after_fetch.remove(&message) {
                     tasks.push(self.open_local_media(&message));
                 }
+                if self.save_after_fetch.remove(&message) {
+                    tasks.push(self.save_media(&message));
+                }
                 if self.play_after_fetch.as_ref() == Some(&message) {
                     self.play_after_fetch = None;
                     tasks.push(self.play_voice(&message));
@@ -761,12 +826,18 @@ impl App {
                 tracing::warn!(id = %message.0, %error, "media download failed");
                 self.fetching.remove(&message);
                 self.open_after_fetch.remove(&message);
+                self.save_after_fetch.remove(&message);
                 if self.play_after_fetch.as_ref() == Some(&message) {
                     self.play_after_fetch = None;
                 }
                 self.media_errors.insert(message, "Download failed".into());
                 Task::none()
             }
+            BackendEvent::AvatarReady { chat, path } => {
+                self.avatars.insert(chat, path);
+                Task::none()
+            }
+            BackendEvent::AvatarMissing { .. } => Task::none(),
             BackendEvent::Error(error) => {
                 tracing::error!(%error, "backend error");
                 self.error = Some(error);
@@ -1302,6 +1373,36 @@ impl Application for App {
             }
             Message::FetchMedia(id) => {
                 self.request_media(&id);
+                Task::none()
+            }
+            Message::SaveMedia(id) => {
+                let local = self
+                    .find_message(&id)
+                    .and_then(|m| m.content.media())
+                    .and_then(media::local_file)
+                    .is_some();
+                if local {
+                    self.save_media(&id)
+                } else {
+                    if self.request_media(&id) {
+                        self.save_after_fetch.insert(id);
+                    }
+                    Task::none()
+                }
+            }
+            Message::MediaSaved(id, result) => {
+                match result {
+                    Ok(path) => {
+                        tracing::info!(id = %id.0, path = %path.display(), "media saved");
+                        self.media_errors.remove(&id);
+                        self.saved_media.insert(id, path);
+                    }
+                    Err(error) => {
+                        tracing::warn!(id = %id.0, %error, "saving media failed");
+                        self.media_errors
+                            .insert(id, format!("Save failed: {error}"));
+                    }
+                }
                 Task::none()
             }
             Message::ToggleVoice(id) => {
