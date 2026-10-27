@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use crate::model::{Chat, ChatId, MediaRef, Message, MessageId, MessageStatus, Reaction};
+use crate::model::{
+    Chat, ChatId, MediaRef, Message, MessageContent, MessageId, MessageStatus, Reaction,
+};
 
 /// UI → backend.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +34,18 @@ pub enum BackendCommand {
     },
     /// Fetch the chat's (contact or group) profile picture.
     FetchAvatar {
+        chat: ChatId,
+    },
+    /// Delete a message: just for us (`for_everyone: false`; applied locally
+    /// by the runtime and synced to the phone), or revoked for every
+    /// participant (`true`; only our own messages).
+    DeleteMessage {
+        chat: ChatId,
+        message: MessageId,
+        for_everyone: bool,
+    },
+    /// Delete a chat with all its messages, locally and on the phone.
+    DeleteChat {
         chat: ChatId,
     },
     /// Unlink this device from the account.
@@ -101,6 +115,21 @@ pub enum BackendEvent {
     /// The chat has no picture we may see (none set, hidden by privacy, or
     /// the lookup failed); the UI should not ask again this session.
     AvatarMissing {
+        chat: ChatId,
+    },
+    /// A message was removed locally.
+    MessageDeleted {
+        chat: ChatId,
+        message: MessageId,
+    },
+    /// A message was revoked for everyone; its content is now `content`.
+    MessageRevoked {
+        chat: ChatId,
+        message: MessageId,
+        content: MessageContent,
+    },
+    /// A chat and all its messages were removed locally.
+    ChatDeleted {
         chat: ChatId,
     },
     Error(String),

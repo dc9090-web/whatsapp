@@ -224,7 +224,7 @@ fn convert_protocol(meta: MsgMeta, pm: &wa::message::ProtocolMessage) -> Convert
             let meta = MsgMeta { id: target, ..meta };
             Converted::Message(build_message(
                 meta,
-                MessageContent::Text("🚫 This message was deleted".to_owned()),
+                MessageContent::Text(crate::model::REVOKED_BY_SENDER.to_owned()),
                 None,
             ))
         }

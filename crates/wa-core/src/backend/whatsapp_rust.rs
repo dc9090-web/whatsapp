@@ -428,6 +428,18 @@ async fn reject(shared: &Shared, cmd: BackendCommand, why: &str) {
         BackendCommand::MarkRead { .. } => {
             tracing::debug!("read receipts skipped: {why}");
         }
+        BackendCommand::DeleteMessage {
+            for_everyone: true, ..
+        } => {
+            shared
+                .emit(BackendEvent::Error(format!(
+                    "Not deleted for everyone: {why}"
+                )))
+                .await;
+        }
+        BackendCommand::DeleteMessage { .. } | BackendCommand::DeleteChat { .. } => {
+            tracing::debug!("delete not synced to the phone: {why}");
+        }
         BackendCommand::Logout | BackendCommand::Shutdown => {}
     }
 }
@@ -562,6 +574,41 @@ fn own_jid(client: &Client) -> String {
         .unwrap_or_default()
 }
 
+/// "Delete for everyone": a sender revoke of our own message.
+async fn revoke_for_everyone(
+    client: &Arc<Client>,
+    chat: &ChatId,
+    message: &MessageId,
+) -> anyhow::Result<()> {
+    let jid = parse_jid(chat)?;
+    client
+        .revoke_message(jid, message.0.clone(), whatsapp_rust::RevokeType::Sender)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// "Delete for me": an app-state action so the phone drops its copy too.
+/// The message key needs the direction and (for others' messages) the
+/// sender, which the side index remembers.
+async fn delete_for_me(
+    shared: &Arc<Shared>,
+    client: &Arc<Client>,
+    chat: &ChatId,
+    message: &MessageId,
+) -> anyhow::Result<()> {
+    let jid = parse_jid(chat)?;
+    let (from_me, participant) = match lock(&shared.index).key(chat, &message.0) {
+        Ok(Some(rec)) => (rec.from_me, (!rec.from_me).then_some(rec.sender)),
+        _ => (true, None),
+    };
+    let participant = participant.as_deref().and_then(|p| p.parse::<Jid>().ok());
+    client
+        .chat_actions()
+        .delete_message_for_me(&jid, participant.as_ref(), &message.0, from_me, true, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 fn parse_jid(chat: &ChatId) -> anyhow::Result<Jid> {
     chat.0
         .parse::<Jid>()
@@ -619,6 +666,59 @@ async fn handle_command(shared: &Arc<Shared>, client: &Arc<Client>, cmd: Backend
                     .await;
             }
         },
+        BackendCommand::DeleteMessage {
+            chat,
+            message,
+            for_everyone,
+        } => {
+            let shared = Arc::clone(shared);
+            let client = Arc::clone(client);
+            tokio::spawn(async move {
+                if for_everyone {
+                    match revoke_for_everyone(&client, &chat, &message).await {
+                        Ok(()) => {
+                            shared
+                                .emit(BackendEvent::MessageRevoked {
+                                    chat,
+                                    message,
+                                    content: crate::model::MessageContent::Text(
+                                        crate::model::REVOKED_BY_ME.to_owned(),
+                                    ),
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("revoke failed: {e:#}");
+                            shared
+                                .emit(BackendEvent::Error(format!(
+                                    "Not deleted for everyone: {e:#}"
+                                )))
+                                .await;
+                        }
+                    }
+                } else if let Err(e) = delete_for_me(&shared, &client, &chat, &message).await {
+                    // The local copy is already gone (runtime); the phone
+                    // just keeps its own.
+                    tracing::warn!("delete-for-me not synced to the phone: {e:#}");
+                }
+            });
+        }
+        BackendCommand::DeleteChat { chat } => {
+            let client = Arc::clone(client);
+            tokio::spawn(async move {
+                let result = match parse_jid(&chat) {
+                    Ok(jid) => client
+                        .chat_actions()
+                        .delete_chat(&jid, true, None)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}")),
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = result {
+                    tracing::warn!("chat deletion not synced to the phone: {e:#}");
+                }
+            });
+        }
         BackendCommand::MarkRead { chat, messages } => {
             if let Err(e) = mark_read(shared, client, &chat, &messages).await {
                 tracing::warn!("read receipts failed: {e:#}");

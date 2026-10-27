@@ -3,7 +3,7 @@
 use chrono::{DateTime, Datelike, Local, TimeZone};
 use cosmic::iced::widget::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
-use cosmic::widget::{self, button, container, icon};
+use cosmic::widget::{self, button, container, icon, mouse_area, popover};
 use cosmic::{Element, theme};
 use wa_core::Chat;
 
@@ -98,7 +98,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         for chat in &app.chats {
             let selected = app.selected.as_ref() == Some(&chat.id);
             let picture = app.avatars.get(&chat.id).map(std::path::PathBuf::as_path);
-            column = column.push(row(chat, selected, now, picture));
+            let menu_open = app.chat_menu_for.as_ref() == Some(&chat.id);
+            column = column.push(row(chat, selected, now, picture, menu_open));
         }
         widget::scrollable(column).height(Length::Fill).into()
     };
@@ -116,6 +117,7 @@ fn row<'a>(
     selected: bool,
     now: DateTime<Local>,
     picture: Option<&'a std::path::Path>,
+    menu_open: bool,
 ) -> Element<'a, Message> {
     let space = theme::spacing();
     let time = if chat.last_activity > 0 {
@@ -173,12 +175,44 @@ fn row<'a>(
                 .push(bottom),
         );
 
-    button::custom(content)
-        .width(Length::Fill)
-        .padding([space.space_xs, space.space_s])
-        .class(list_row_class(selected))
-        .on_press(Message::SelectChat(chat.id.clone()))
+    let row = mouse_area(
+        button::custom(content)
+            .width(Length::Fill)
+            .padding([space.space_xs, space.space_s])
+            .class(list_row_class(selected))
+            .on_press(Message::SelectChat(chat.id.clone())),
+    )
+    .on_right_press(Message::OpenChatMenu(chat.id.clone()));
+    if !menu_open {
+        return row.into();
+    }
+    popover(row)
+        .popup(chat_menu(chat))
+        .position(widget::popover::Position::Bottom)
+        .on_close(Message::CloseChatMenu)
         .into()
+}
+
+/// Right-click menu of a chat row.
+fn chat_menu<'a>(chat: &'a Chat) -> Element<'a, Message> {
+    let space = theme::spacing();
+    container(
+        button::custom(
+            widget::row::with_capacity(2)
+                .spacing(space.space_xs)
+                .align_y(Alignment::Center)
+                .push(icon::from_name("edit-delete-symbolic").size(16))
+                .push(widget::text::body("Delete chat")),
+        )
+        .width(Length::Fill)
+        .padding([space.space_xxs, space.space_s])
+        .class(theme::Button::MenuItem)
+        .on_press(Message::AskDeleteChat(chat.id.clone())),
+    )
+    .padding(space.space_xxs)
+    .width(Length::Fixed(220.0))
+    .class(theme::Container::Dropdown)
+    .into()
 }
 
 #[cfg(test)]

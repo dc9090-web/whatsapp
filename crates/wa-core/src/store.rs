@@ -452,6 +452,62 @@ impl Store {
         Ok(changed)
     }
 
+    /// Removes one message and its reactions; returns `true` if it existed.
+    /// The chat's preview is recomputed from the newest remaining message.
+    pub fn delete_message(&self, chat: &ChatId, id: &MessageId) -> anyhow::Result<bool> {
+        self.conn.execute(
+            "DELETE FROM reactions WHERE chat = ?1 AND target = ?2",
+            params![chat.0, id.0],
+        )?;
+        let removed = self.conn.execute(
+            "DELETE FROM messages WHERE chat = ?1 AND id = ?2",
+            params![chat.0, id.0],
+        )?;
+        if removed > 0 {
+            self.refresh_summary(chat)?;
+        }
+        Ok(removed > 0)
+    }
+
+    /// Removes a chat with all its messages and reactions.
+    pub fn delete_chat(&self, chat: &ChatId) -> anyhow::Result<()> {
+        self.conn
+            .execute("DELETE FROM reactions WHERE chat = ?1", params![chat.0])?;
+        self.conn
+            .execute("DELETE FROM messages WHERE chat = ?1", params![chat.0])?;
+        self.conn
+            .execute("DELETE FROM chats WHERE id = ?1", params![chat.0])?;
+        Ok(())
+    }
+
+    /// Replaces a message's content (a revoked message becomes a placeholder),
+    /// keeping its position, sender and status.
+    pub fn replace_content(
+        &self,
+        chat: &ChatId,
+        id: &MessageId,
+        content: &MessageContent,
+    ) -> anyhow::Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE messages SET content = ?3 WHERE chat = ?1 AND id = ?2",
+            params![chat.0, id.0, serde_json::to_string(content)?],
+        )?;
+        if changed > 0 {
+            self.refresh_summary(chat)?;
+        }
+        Ok(())
+    }
+
+    /// Sets the chat's preview to its newest message (or clears it).
+    fn refresh_summary(&self, chat: &ChatId) -> anyhow::Result<()> {
+        let newest = self.messages(chat, None, 1)?.pop();
+        self.conn.execute(
+            "UPDATE chats SET last_preview = ?2 WHERE id = ?1",
+            params![chat.0, newest.map(|m| m.content.preview())],
+        )?;
+        Ok(())
+    }
+
     /// Deletes all rows (used by explicit Log out).
     pub fn wipe(&self) -> anyhow::Result<()> {
         self.conn.execute_batch(
@@ -934,6 +990,71 @@ mod tests {
             0
         );
         assert_eq!(s.total_unread().unwrap(), 2);
+    }
+
+    #[test]
+    fn delete_message_removes_row_and_refreshes_preview() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_message(&msg(&direct(), "A", 100, false, "first"))
+            .unwrap();
+        s.upsert_message(&msg(&direct(), "B", 200, false, "second"))
+            .unwrap();
+        s.apply_reaction(&Reaction {
+            chat: direct(),
+            target: MessageId("B".into()),
+            sender: "x".into(),
+            emoji: "👍".into(),
+            timestamp: 1,
+        })
+        .unwrap();
+        assert!(s.delete_message(&direct(), &MessageId("B".into())).unwrap());
+        assert!(!s.delete_message(&direct(), &MessageId("B".into())).unwrap());
+        assert_eq!(s.messages(&direct(), None, 10).unwrap().len(), 1);
+        assert!(
+            s.reactions(&direct(), &MessageId("B".into()))
+                .unwrap()
+                .is_empty()
+        );
+        let c = s.chat(&direct()).unwrap().unwrap();
+        assert_eq!(c.last_preview.as_deref(), Some("first"));
+        assert!(s.delete_message(&direct(), &MessageId("A".into())).unwrap());
+        assert_eq!(s.chat(&direct()).unwrap().unwrap().last_preview, None);
+    }
+
+    #[test]
+    fn delete_chat_removes_everything_for_that_chat_only() {
+        let s = Store::open_in_memory().unwrap();
+        let other = ChatId("2@s.whatsapp.net".into());
+        s.upsert_message(&msg(&direct(), "A", 100, false, "a"))
+            .unwrap();
+        s.upsert_message(&msg(&other, "B", 100, false, "b"))
+            .unwrap();
+        s.delete_chat(&direct()).unwrap();
+        assert!(s.chat(&direct()).unwrap().is_none());
+        assert!(s.messages(&direct(), None, 10).unwrap().is_empty());
+        assert_eq!(s.chats().unwrap().len(), 1);
+        assert_eq!(s.messages(&other, None, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn replace_content_keeps_row_and_updates_preview() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_message(&msg(&direct(), "A", 100, true, "oops"))
+            .unwrap();
+        let placeholder = MessageContent::Text(crate::model::REVOKED_BY_ME.to_owned());
+        s.replace_content(&direct(), &MessageId("A".into()), &placeholder)
+            .unwrap();
+        let m = s
+            .message(&direct(), &MessageId("A".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.content, placeholder);
+        assert_eq!(m.timestamp, 100);
+        assert!(m.from_me);
+        assert_eq!(
+            s.chat(&direct()).unwrap().unwrap().last_preview.as_deref(),
+            Some(crate::model::REVOKED_BY_ME)
+        );
     }
 
     #[test]

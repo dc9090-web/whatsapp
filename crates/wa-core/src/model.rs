@@ -4,6 +4,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Placeholder text of a message its sender deleted for everyone.
+pub const REVOKED_BY_SENDER: &str = "🚫 This message was deleted";
+/// Placeholder text of a message we deleted for everyone.
+pub const REVOKED_BY_ME: &str = "🚫 You deleted this message";
+
 /// A WhatsApp JID as a string, e.g. `15551234567@s.whatsapp.net` or `1203...@g.us`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChatId(pub String);

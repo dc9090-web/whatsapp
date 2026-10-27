@@ -353,6 +353,22 @@ fn context_menu<'a>(msg: &'a wa_core::Message) -> Element<'a, Message> {
             Message::CopyText(text),
         ));
     }
+    menu = menu.push(widget::divider::horizontal::light()).push(item(
+        "Delete for me",
+        icon::from_name("edit-delete-symbolic").into(),
+        Message::DeleteForMe(msg.id.clone()),
+    ));
+    // Only our own, delivered messages can be revoked for everyone.
+    if msg.from_me
+        && !msg.id.is_local()
+        && !matches!(msg.status, MessageStatus::Pending | MessageStatus::Failed)
+    {
+        menu = menu.push(item(
+            "Delete for everyone",
+            icon::from_name("edit-delete-symbolic").into(),
+            Message::AskDeleteForEveryone(msg.id.clone()),
+        ));
+    }
 
     container(menu)
         .padding(space.space_xxs)

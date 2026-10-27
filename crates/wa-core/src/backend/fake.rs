@@ -170,7 +170,23 @@ impl WhatsAppBackend for FakeBackend {
                         let _ = events.send(event).await;
                     });
                 }
-                BackendCommand::MarkRead { .. } => {}
+                BackendCommand::DeleteMessage {
+                    chat,
+                    message,
+                    for_everyone: true,
+                } => {
+                    let event = BackendEvent::MessageRevoked {
+                        chat,
+                        message,
+                        content: MessageContent::Text(crate::model::REVOKED_BY_ME.to_owned()),
+                    };
+                    if events.send(event).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                BackendCommand::DeleteMessage { .. }
+                | BackendCommand::DeleteChat { .. }
+                | BackendCommand::MarkRead { .. } => {}
             }
         }
         Ok(())

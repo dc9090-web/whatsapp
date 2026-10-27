@@ -28,6 +28,9 @@ single binary that follows your COSMIC theme and accent colour.
   picker, remove them again
 - Read receipts are sent when you open a chat; reading on your phone clears
   the unread count here too
+- Delete messages from the right-click menu: for you (synced to your phone)
+  or, for your own messages, for everyone; delete whole chats from the chat
+  list the same way
 
 **Media**
 - Images and stickers shown inline (small previews first, full image fetched
@@ -190,6 +193,7 @@ docs/superpowers/                 the design spec and implementation plan this w
 - [ ] **React:** react from the app and from the phone; both show, and your own reaction is highlighted
 - [ ] **Media:** an incoming image and sticker display; a voice note plays; a document downloads and opens; Save to Downloads works
 - [ ] **Profile pictures:** contacts and groups show their pictures
+- [ ] **Delete:** "Delete for everyone" on your own message shows the placeholder on the phone too; "Delete for me" and "Delete chat" disappear on the phone
 - [ ] **Reconnect:** disable networking for a minute, re-enable; the app reconnects and catches up
 - [ ] **Remote logout:** remove the linked device on the phone; the app returns to the QR screen
 - [ ] **Log out** from the app's menu wipes the local data

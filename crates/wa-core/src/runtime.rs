@@ -109,6 +109,11 @@ async fn command_pump(
             BackendCommand::SendText { .. }
                 | BackendCommand::MarkRead { .. }
                 | BackendCommand::Logout
+                | BackendCommand::DeleteMessage {
+                    for_everyone: false,
+                    ..
+                }
+                | BackendCommand::DeleteChat { .. }
         ) {
             let (done, ack) = oneshot::channel();
             if work
@@ -154,7 +159,15 @@ fn rejected(command: BackendCommand) -> Option<BackendEvent> {
         BackendCommand::React { .. } | BackendCommand::Logout => {
             Some(BackendEvent::Error(format!("Not done: {WHY}")))
         }
-        BackendCommand::MarkRead { .. } | BackendCommand::Shutdown => None,
+        BackendCommand::DeleteMessage {
+            for_everyone: true, ..
+        } => Some(BackendEvent::Error(format!(
+            "Not deleted for everyone: {WHY}"
+        ))),
+        BackendCommand::MarkRead { .. }
+        | BackendCommand::DeleteMessage { .. }
+        | BackendCommand::DeleteChat { .. }
+        | BackendCommand::Shutdown => None,
     }
 }
 
@@ -226,6 +239,25 @@ fn apply_command(
     logout_requested: &mut bool,
 ) -> Vec<BackendEvent> {
     match command {
+        BackendCommand::DeleteMessage {
+            chat,
+            message,
+            for_everyone: false,
+        } => match store.delete_message(chat, message) {
+            Ok(_) => vec![BackendEvent::MessageDeleted {
+                chat: chat.clone(),
+                message: message.clone(),
+            }],
+            Err(e) => vec![BackendEvent::Error(format!(
+                "Could not delete the message: {e:#}"
+            ))],
+        },
+        BackendCommand::DeleteChat { chat } => match store.delete_chat(chat) {
+            Ok(()) => vec![BackendEvent::ChatDeleted { chat: chat.clone() }],
+            Err(e) => vec![BackendEvent::Error(format!(
+                "Could not delete the chat: {e:#}"
+            ))],
+        },
         BackendCommand::SendText {
             chat,
             text,
@@ -283,6 +315,9 @@ fn apply_command(
         BackendCommand::React { .. }
         | BackendCommand::FetchMedia { .. }
         | BackendCommand::FetchAvatar { .. }
+        | BackendCommand::DeleteMessage {
+            for_everyone: true, ..
+        }
         | BackendCommand::Shutdown => Vec::new(),
     }
 }
@@ -320,6 +355,15 @@ fn apply_event(
             path,
         } => store.set_media_path(chat, message, path),
         BackendEvent::AvatarReady { chat, path } => store.set_chat_avatar(chat, path),
+        BackendEvent::MessageDeleted { chat, message } => {
+            store.delete_message(chat, message).map(drop)
+        }
+        BackendEvent::MessageRevoked {
+            chat,
+            message,
+            content,
+        } => store.replace_content(chat, message, content),
+        BackendEvent::ChatDeleted { chat } => store.delete_chat(chat),
         BackendEvent::LoggedOut => {
             if std::mem::take(logout_requested) {
                 store.wipe()
@@ -356,6 +400,9 @@ fn event_name(event: &BackendEvent) -> &'static str {
         BackendEvent::MediaFailed { .. } => "MediaFailed",
         BackendEvent::AvatarReady { .. } => "AvatarReady",
         BackendEvent::AvatarMissing { .. } => "AvatarMissing",
+        BackendEvent::MessageDeleted { .. } => "MessageDeleted",
+        BackendEvent::MessageRevoked { .. } => "MessageRevoked",
+        BackendEvent::ChatDeleted { .. } => "ChatDeleted",
         BackendEvent::Error(_) => "Error",
     }
 }

@@ -48,6 +48,8 @@ pub enum Dialog {
     EmojiPicker(MessageId),
     ImageViewer { path: PathBuf },
     ConfirmLogout,
+    ConfirmDeleteForEveryone(MessageId),
+    ConfirmDeleteChat(ChatId),
 }
 
 // Transient UI messages; boxing the event would only add allocations.
@@ -98,6 +100,14 @@ pub enum Message {
     SetAppearance(Appearance),
     SetPreviews(bool),
     SetSound(bool),
+
+    DeleteForMe(MessageId),
+    AskDeleteForEveryone(MessageId),
+    ConfirmDeleteForEveryone,
+    OpenChatMenu(ChatId),
+    CloseChatMenu,
+    AskDeleteChat(ChatId),
+    ConfirmDeleteChat,
     SetAutostart(bool),
     RequestLogout,
     ConfirmLogout,
@@ -127,6 +137,8 @@ pub struct App {
     pub replying_to: Option<wa_core::Message>,
     pub hovered: Option<MessageId>,
     pub menu_for: Option<MessageId>,
+    /// Chat whose right-click menu is open.
+    pub chat_menu_for: Option<ChatId>,
     pub dialog: Option<Dialog>,
     pub header_menu_open: bool,
     pub show_settings: bool,
@@ -238,6 +250,7 @@ impl App {
             replying_to: None,
             hovered: None,
             menu_for: None,
+            chat_menu_for: None,
             dialog: None,
             header_menu_open: false,
             show_settings: false,
@@ -826,6 +839,19 @@ impl App {
                 Task::none()
             }
             BackendEvent::AvatarMissing { .. } => Task::none(),
+            BackendEvent::MessageDeleted { chat, .. }
+            | BackendEvent::MessageRevoked { chat, .. } => {
+                self.schedule_reload(self.selected.as_ref() == Some(&chat))
+            }
+            BackendEvent::ChatDeleted { chat } => {
+                if self.selected.as_ref() == Some(&chat) {
+                    self.selected = None;
+                    self.conversation = None;
+                    self.replying_to = None;
+                }
+                self.avatars.remove(&chat);
+                self.schedule_reload(false)
+            }
             BackendEvent::Error(error) => {
                 tracing::error!(%error, "backend error");
                 self.error = Some(error);
@@ -1094,6 +1120,30 @@ impl Application for App {
                     .secondary_action(button::standard("Open in viewer").on_press(Message::OpenFile(path.clone())))
                     .into(),
             ),
+            Dialog::ConfirmDeleteForEveryone(_) => Some(
+                widget::dialog()
+                    .title("Delete for everyone?")
+                    .body("The message will be removed for everyone in this chat. People may already have seen it.")
+                    .primary_action(button::destructive("Delete for everyone").on_press(Message::ConfirmDeleteForEveryone))
+                    .secondary_action(button::standard("Cancel").on_press(Message::CloseDialog))
+                    .into(),
+            ),
+            Dialog::ConfirmDeleteChat(chat) => {
+                let name = self
+                    .chats
+                    .iter()
+                    .find(|c| &c.id == chat)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| chat.user().to_owned());
+                Some(
+                    widget::dialog()
+                        .title(format!("Delete chat with {name}?"))
+                        .body("All messages in this chat will be deleted here and on your phone.")
+                        .primary_action(button::destructive("Delete chat").on_press(Message::ConfirmDeleteChat))
+                        .secondary_action(button::standard("Cancel").on_press(Message::CloseDialog))
+                        .into(),
+                )
+            }
             Dialog::ConfirmLogout => Some(
                 widget::dialog()
                     .title("Log out of WhatsApp?")
@@ -1108,6 +1158,7 @@ impl Application for App {
     fn on_escape(&mut self) -> Task<Message> {
         if self.dialog.take().is_none()
             && self.menu_for.take().is_none()
+            && self.chat_menu_for.take().is_none()
             && !std::mem::take(&mut self.header_menu_open)
         {
             self.replying_to = None;
@@ -1279,6 +1330,60 @@ impl Application for App {
             }
             Message::CloseMessageMenu => {
                 self.menu_for = None;
+                Task::none()
+            }
+            Message::DeleteForMe(id) => {
+                self.menu_for = None;
+                if let Some(msg) = self.find_message(&id) {
+                    let chat = msg.chat.clone();
+                    self.send(BackendCommand::DeleteMessage {
+                        chat,
+                        message: id,
+                        for_everyone: false,
+                    });
+                }
+                Task::none()
+            }
+            Message::AskDeleteForEveryone(id) => {
+                self.menu_for = None;
+                self.dialog = Some(Dialog::ConfirmDeleteForEveryone(id));
+                Task::none()
+            }
+            Message::ConfirmDeleteForEveryone => {
+                if let Some(Dialog::ConfirmDeleteForEveryone(id)) = self.dialog.take()
+                    && let Some(msg) = self.find_message(&id)
+                {
+                    let chat = msg.chat.clone();
+                    self.send(BackendCommand::DeleteMessage {
+                        chat,
+                        message: id,
+                        for_everyone: true,
+                    });
+                }
+                Task::none()
+            }
+            Message::OpenChatMenu(id) => {
+                self.chat_menu_for = Some(id);
+                Task::none()
+            }
+            Message::CloseChatMenu => {
+                self.chat_menu_for = None;
+                Task::none()
+            }
+            Message::AskDeleteChat(id) => {
+                self.chat_menu_for = None;
+                self.dialog = Some(Dialog::ConfirmDeleteChat(id));
+                Task::none()
+            }
+            Message::ConfirmDeleteChat => {
+                if let Some(Dialog::ConfirmDeleteChat(chat)) = self.dialog.take() {
+                    if self.selected.as_ref() == Some(&chat) {
+                        self.selected = None;
+                        self.conversation = None;
+                        self.replying_to = None;
+                    }
+                    self.send(BackendCommand::DeleteChat { chat });
+                }
                 Task::none()
             }
             Message::OpenEmojiPicker(id) => {
