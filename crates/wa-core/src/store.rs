@@ -196,6 +196,10 @@ impl Store {
 
     /// Up to `limit` messages strictly older than `before` (unix ms), or the newest
     /// `limit` if `before` is `None`. Returned in ascending timestamp order.
+    ///
+    /// For paging back from a loaded message prefer [`Store::messages_before`]:
+    /// timestamps have whole-second resolution, so several messages can share
+    /// the `before` timestamp and this would skip the ones not yet loaded.
     pub fn messages(
         &self,
         chat: &ChatId,
@@ -213,12 +217,30 @@ impl Store {
             params![chat.0, before.unwrap_or(i64::MAX), limit],
             row_to_raw_message,
         )?;
-        let mut out = Vec::new();
-        for raw in rows {
-            out.push(raw?.decode()?);
-        }
-        out.reverse();
-        Ok(out)
+        collect_messages(rows)
+    }
+
+    /// Up to `limit` messages that sort before the stored message `oldest`
+    /// (whose timestamp is `ts`) in the order `messages` uses — `(ts, rowid)` —
+    /// so messages sharing `oldest`'s second are not skipped. Ascending order.
+    /// If `oldest` is not stored (any more), falls back to `ts < ts`.
+    pub fn messages_before(
+        &self,
+        chat: &ChatId,
+        ts: i64,
+        oldest: &MessageId,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Message>> {
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages
+             WHERE chat = ?1 AND (ts < ?2 OR (ts = ?2 AND rowid <
+               COALESCE((SELECT rowid FROM messages WHERE chat = ?1 AND id = ?3), -1)))
+             ORDER BY ts DESC, rowid DESC LIMIT ?4"
+        );
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![chat.0, ts, oldest.0, limit], row_to_raw_message)?;
+        collect_messages(rows)
     }
 
     /// Sets status, except that it never moves backwards (Read stays Read),
@@ -329,6 +351,26 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Every reaction in `chat` whose target message has a timestamp of at
+    /// least `min_ts`, in one query (for a whole loaded conversation page).
+    pub fn reactions_since(&self, chat: &ChatId, min_ts: i64) -> anyhow::Result<Vec<Reaction>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT r.chat, r.target, r.sender, r.emoji, r.ts FROM reactions r
+             JOIN messages m ON m.chat = r.chat AND m.id = r.target
+             WHERE r.chat = ?1 AND m.ts >= ?2 ORDER BY r.ts, r.sender",
+        )?;
+        let rows = stmt.query_map(params![chat.0, min_ts], |r| {
+            Ok(Reaction {
+                chat: ChatId(r.get(0)?),
+                target: MessageId(r.get(1)?),
+                sender: r.get(2)?,
+                emoji: r.get(3)?,
+                timestamp: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Records where the decrypted media file lives (updates `MediaRef::local_path`).
     pub fn set_media_path(&self, chat: &ChatId, id: &MessageId, path: &Path) -> anyhow::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
@@ -370,6 +412,22 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(u32::try_from(total.max(0)).unwrap_or(u32::MAX))
+    }
+
+    /// Marks our own optimistic messages that are still `Pending` as `Failed`.
+    /// Called once at startup: whatever was in flight when the previous run
+    /// ended (quit, crash, dead backend) will never be confirmed, and only
+    /// `Failed` messages offer Retry. Returns how many were changed.
+    pub fn fail_stale_pending(&self) -> anyhow::Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE messages SET status = ?1
+             WHERE from_me = 1 AND status = ?2 AND id LIKE 'local-%'",
+            params![
+                status_to_str(MessageStatus::Failed)?,
+                status_to_str(MessageStatus::Pending)?
+            ],
+        )?;
+        Ok(changed)
     }
 
     /// Deletes all rows (used by explicit Log out).
@@ -462,6 +520,42 @@ impl RawMessage {
     }
 }
 
+impl RawMessage {
+    fn decode_lossy(self) -> Message {
+        let fallback = (
+            self.id.clone(),
+            self.chat.clone(),
+            self.sender.clone(),
+            self.from_me,
+            self.ts,
+        );
+        match self.decode() {
+            Ok(m) => m,
+            Err(e) => {
+                let (id, chat, sender, from_me, ts) = fallback;
+                tracing::warn!("undecodable message {id} in {chat}: {e:#}");
+                Message {
+                    id: MessageId(id),
+                    chat: ChatId(chat),
+                    sender,
+                    sender_name: None,
+                    from_me,
+                    timestamp: ts,
+                    content: MessageContent::Unsupported {
+                        kind: "unreadable".to_owned(),
+                    },
+                    reply_to: None,
+                    status: if from_me {
+                        MessageStatus::Sent
+                    } else {
+                        MessageStatus::Received
+                    },
+                }
+            }
+        }
+    }
+}
+
 fn row_to_raw_message(r: &Row<'_>) -> rusqlite::Result<RawMessage> {
     Ok(RawMessage {
         id: r.get(0)?,
@@ -474,6 +568,20 @@ fn row_to_raw_message(r: &Row<'_>) -> rusqlite::Result<RawMessage> {
         reply_to: r.get(7)?,
         status: r.get(8)?,
     })
+}
+
+/// Decodes a page of rows. A row whose JSON cannot be decoded (corrupt, or
+/// written by another build) is shown as `Unsupported` instead of failing the
+/// whole page, so one bad row never makes a chat unopenable.
+fn collect_messages(
+    rows: impl Iterator<Item = rusqlite::Result<RawMessage>>,
+) -> anyhow::Result<Vec<Message>> {
+    let mut out = Vec::new();
+    for raw in rows {
+        out.push(raw?.decode_lossy());
+    }
+    out.reverse();
+    Ok(out)
 }
 
 fn load_message(
@@ -831,5 +939,130 @@ mod tests {
         // A second concurrent handle works too (WAL).
         let s2 = Store::open(&path).unwrap();
         assert_eq!(s2.chats().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn messages_before_does_not_skip_same_second_messages() {
+        let s = Store::open_in_memory().unwrap();
+        // Two oldest messages share a timestamp (an album / burst).
+        s.upsert_message(&msg(&direct(), "a", 1000, false, "a"))
+            .unwrap();
+        s.upsert_message(&msg(&direct(), "b", 1000, false, "b"))
+            .unwrap();
+        for i in 0..50 {
+            s.upsert_message(&msg(&direct(), &format!("n{i}"), 2000 + i, false, "x"))
+                .unwrap();
+        }
+        let page = s.messages(&direct(), None, 51).unwrap();
+        assert_eq!(page.len(), 51);
+        let oldest = &page[0];
+        assert_eq!(oldest.id.0, "b");
+        // The old `ts < before` cursor loses "a" for good.
+        assert!(
+            s.messages(&direct(), Some(oldest.timestamp), 50)
+                .unwrap()
+                .is_empty()
+        );
+        let older = s
+            .messages_before(&direct(), oldest.timestamp, &oldest.id, 50)
+            .unwrap();
+        let ids: Vec<_> = older.iter().map(|m| m.id.0.as_str()).collect();
+        assert_eq!(ids, ["a"]);
+        let none = s
+            .messages_before(&direct(), older[0].timestamp, &older[0].id, 50)
+            .unwrap();
+        assert!(none.is_empty());
+        // Unknown cursor id: plain `ts < before`.
+        let fallback = s
+            .messages_before(&direct(), 2000, &MessageId("gone".into()), 50)
+            .unwrap();
+        assert_eq!(fallback.len(), 2);
+    }
+
+    #[test]
+    fn fail_stale_pending_only_touches_local_pending() {
+        let s = Store::open_in_memory().unwrap();
+        let c = direct();
+        let mut pending = msg(&c, "local-1", 1, true, "x");
+        pending.status = MessageStatus::Pending;
+        s.upsert_message(&pending).unwrap();
+        let mut sent = msg(&c, "local-2", 2, true, "y");
+        sent.status = MessageStatus::Sent;
+        s.upsert_message(&sent).unwrap();
+        let mut server = msg(&c, "SERVER", 3, true, "z");
+        server.status = MessageStatus::Pending;
+        s.upsert_message(&server).unwrap();
+        assert_eq!(s.fail_stale_pending().unwrap(), 1);
+        let status = |id: &str| {
+            s.message(&c, &MessageId(id.into()))
+                .unwrap()
+                .unwrap()
+                .status
+        };
+        assert_eq!(status("local-1"), MessageStatus::Failed);
+        assert_eq!(status("local-2"), MessageStatus::Sent);
+        assert_eq!(status("SERVER"), MessageStatus::Pending);
+    }
+
+    #[test]
+    fn undecodable_row_does_not_break_the_page() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_message(&msg(&direct(), "good", 1, false, "fine"))
+            .unwrap();
+        s.upsert_message(&msg(&direct(), "bad", 2, false, "x"))
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE messages SET content = '{\"FutureVariant\":1}' WHERE id = 'bad'",
+                [],
+            )
+            .unwrap();
+        let page = s.messages(&direct(), None, 50).unwrap();
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].content, MessageContent::Text("fine".into()));
+        assert!(matches!(
+            page[1].content,
+            MessageContent::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn reactions_since_loads_a_page_in_one_query() {
+        let s = Store::open_in_memory().unwrap();
+        let c = direct();
+        s.upsert_message(&msg(&c, "old", 1, false, "x")).unwrap();
+        s.upsert_message(&msg(&c, "new", 10, false, "y")).unwrap();
+        for target in ["old", "new"] {
+            s.apply_reaction(&Reaction {
+                chat: c.clone(),
+                target: MessageId(target.into()),
+                sender: "a".into(),
+                emoji: "👍".into(),
+                timestamp: 5,
+            })
+            .unwrap();
+        }
+        let got = s.reactions_since(&c, 10).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].target.0, "new");
+        assert_eq!(s.reactions_since(&c, 0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn upsert_chat_at_latest_activity_clears_unread_without_reordering() {
+        // How the backend reports "read on another device".
+        let s = Store::open_in_memory().unwrap();
+        let c = direct();
+        s.upsert_message(&msg(&c, "A", 1000, false, "x")).unwrap();
+        s.upsert_message(&msg(&c, "B", 2000, false, "y")).unwrap();
+        assert_eq!(s.chat(&c).unwrap().unwrap().unread, 2);
+        // Read up to an older message: newer unread stays.
+        s.upsert_chat(&chat(&c.0, "Ana", 1000, 0, false)).unwrap();
+        assert_eq!(s.chat(&c).unwrap().unwrap().unread, 2);
+        s.upsert_chat(&chat(&c.0, "Ana", 2000, 0, false)).unwrap();
+        let got = s.chat(&c).unwrap().unwrap();
+        assert_eq!(got.unread, 0);
+        assert_eq!(got.last_activity, 2000);
+        assert_eq!(got.last_preview.as_deref(), Some("y"));
     }
 }

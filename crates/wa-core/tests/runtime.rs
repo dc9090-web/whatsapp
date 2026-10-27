@@ -410,3 +410,70 @@ async fn demo_script_is_rich_and_persists() {
             .all(|w| w[0].last_activity >= w[1].last_activity)
     );
 }
+
+/// A backend that dies immediately, like a panic inside whatsapp-rust.
+struct PanickingBackend;
+
+#[async_trait::async_trait]
+impl wa_core::WhatsAppBackend for PanickingBackend {
+    async fn run(
+        self: Box<Self>,
+        _commands: mpsc::Receiver<BackendCommand>,
+        _events: mpsc::Sender<BackendEvent>,
+    ) -> anyhow::Result<()> {
+        panic!("simulated backend crash");
+    }
+}
+
+#[tokio::test]
+async fn dead_backend_is_reported_and_commands_fail() {
+    let store = Store::open_in_memory().unwrap();
+    let mut handle = start(Box::new(PanickingBackend), store);
+    assert!(matches!(next(&mut handle).await, BackendEvent::Error(_)));
+    assert_eq!(
+        next(&mut handle).await,
+        BackendEvent::Connection(wa_core::ConnectionState::Disconnected)
+    );
+    let local_id = MessageId::new_local();
+    handle
+        .commands
+        .send(BackendCommand::SendText {
+            chat: alice(),
+            text: "anyone?".into(),
+            reply_to: None,
+            local_id: local_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(next(&mut handle).await, BackendEvent::Message(m) if m.id == local_id));
+    match next(&mut handle).await {
+        BackendEvent::SendFailed { local_id: l, .. } => assert_eq!(l, local_id),
+        other => panic!("expected SendFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn pending_messages_from_last_run_become_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("app.db");
+    let local_id = MessageId::new_local();
+    {
+        let store = Store::open(&db).unwrap();
+        let mut m = incoming(&local_id.0, 1, "in flight");
+        m.from_me = true;
+        m.status = MessageStatus::Pending;
+        store.upsert_message(&m).unwrap();
+    }
+    let backend = FakeBackend {
+        script: vec![],
+        received: None,
+        auto_reply: false,
+    };
+    let _handle = start(Box::new(backend), Store::open(&db).unwrap());
+    let status = reopen(&db)
+        .message(&alice(), &local_id)
+        .unwrap()
+        .unwrap()
+        .status;
+    assert_eq!(status, MessageStatus::Failed);
+}

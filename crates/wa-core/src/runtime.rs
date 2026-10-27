@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::backend::WhatsAppBackend;
-use crate::events::{BackendCommand, BackendEvent};
+use crate::events::{BackendCommand, BackendEvent, ConnectionState};
 use crate::model::{Message, MessageContent, MessageStatus, QuotedMessage};
 use crate::store::Store;
 
@@ -37,28 +37,33 @@ pub struct Handle {
 /// of the write connection) performs it and acknowledges, so a command is only
 /// forwarded to the backend once its optimistic effects are persisted and
 /// announced; the backend's answer can therefore never overtake them.
-struct StoreWork {
-    command: BackendCommand,
-    done: oneshot::Sender<()>,
+enum Work {
+    Command {
+        command: BackendCommand,
+        done: oneshot::Sender<()>,
+    },
+    /// An event synthesized by the runtime itself (a command the backend could
+    /// not take), persisted and forwarded like a backend event.
+    Event(BackendEvent),
 }
 
 /// Spawns the backend and the persistence task on the current tokio runtime.
 pub fn start(backend: Box<dyn WhatsAppBackend>, store: Store) -> Handle {
+    // Whatever was still in flight when the previous run ended will never be
+    // confirmed; make it retryable.
+    match store.fail_stale_pending() {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("marked {n} unsent message(s) from the last run as failed"),
+        Err(e) => tracing::error!("could not fail stale pending messages: {e:#}"),
+    }
+
     let (ui_cmd_tx, ui_cmd_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (ui_ev_tx, ui_ev_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (be_cmd_tx, be_cmd_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (be_ev_tx, be_ev_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (work_tx, work_rx) = mpsc::channel(CHANNEL_CAPACITY);
 
-    let error_tx = be_ev_tx.clone();
-    tokio::spawn(async move {
-        if let Err(e) = backend.run(be_cmd_rx, be_ev_tx).await {
-            tracing::error!("backend stopped with an error: {e:#}");
-            let _ = error_tx
-                .send(BackendEvent::Error(format!("Backend stopped: {e:#}")))
-                .await;
-        }
-    });
+    tokio::spawn(supervise(backend, be_cmd_rx, be_ev_tx));
     tokio::spawn(command_pump(ui_cmd_rx, be_cmd_tx, work_tx));
     tokio::spawn(event_pump(store, be_ev_rx, work_rx, ui_ev_tx));
 
@@ -68,10 +73,34 @@ pub fn start(backend: Box<dyn WhatsAppBackend>, store: Store) -> Handle {
     }
 }
 
+/// Runs the backend in its own task and reports when it dies (error or
+/// panic) instead of leaving the UI showing the last connection state.
+async fn supervise(
+    backend: Box<dyn WhatsAppBackend>,
+    commands: mpsc::Receiver<BackendCommand>,
+    events: mpsc::Sender<BackendEvent>,
+) {
+    let report = events.clone();
+    let task = tokio::spawn(backend.run(commands, events));
+    let failure = match task.await {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(format!("Backend stopped: {e:#}")),
+        Err(e) if e.is_panic() => Some("Backend crashed; restart the app to reconnect".to_owned()),
+        Err(e) => Some(format!("Backend stopped: {e}")),
+    };
+    if let Some(msg) = failure {
+        tracing::error!("{msg}");
+        let _ = report.send(BackendEvent::Error(msg)).await;
+        let _ = report
+            .send(BackendEvent::Connection(ConnectionState::Disconnected))
+            .await;
+    }
+}
+
 async fn command_pump(
     mut ui: mpsc::Receiver<BackendCommand>,
     backend: mpsc::Sender<BackendCommand>,
-    work: mpsc::Sender<StoreWork>,
+    work: mpsc::Sender<Work>,
 ) {
     while let Some(command) = ui.recv().await {
         let shutdown = command == BackendCommand::Shutdown;
@@ -83,7 +112,7 @@ async fn command_pump(
         ) {
             let (done, ack) = oneshot::channel();
             if work
-                .send(StoreWork {
+                .send(Work::Command {
                     command: command.clone(),
                     done,
                 })
@@ -94,8 +123,11 @@ async fn command_pump(
                 let _ = ack.await;
             }
         }
-        if backend.send(command).await.is_err() {
-            tracing::warn!("backend is not running; dropping command");
+        if let Err(mpsc::error::SendError(command)) = backend.send(command).await {
+            tracing::warn!("backend is not running; failing command");
+            if let Some(event) = rejected(command) {
+                let _ = work.send(Work::Event(event)).await;
+            }
         }
         if shutdown {
             break;
@@ -104,39 +136,83 @@ async fn command_pump(
     // Dropping `backend` closes the backend's command stream, which stops it.
 }
 
+/// The failure event for a command the backend never received.
+fn rejected(command: BackendCommand) -> Option<BackendEvent> {
+    const WHY: &str = "the WhatsApp backend is not running";
+    match command {
+        BackendCommand::SendText { chat, local_id, .. } => Some(BackendEvent::SendFailed {
+            chat,
+            local_id,
+            error: WHY.to_owned(),
+        }),
+        BackendCommand::FetchMedia { chat, message, .. } => Some(BackendEvent::MediaFailed {
+            chat,
+            message,
+            error: WHY.to_owned(),
+        }),
+        BackendCommand::React { .. } | BackendCommand::Logout => {
+            Some(BackendEvent::Error(format!("Not done: {WHY}")))
+        }
+        BackendCommand::MarkRead { .. } | BackendCommand::Shutdown => None,
+    }
+}
+
 async fn event_pump(
     store: Store,
     mut backend: mpsc::Receiver<BackendEvent>,
-    mut work: mpsc::Receiver<StoreWork>,
+    mut work: mpsc::Receiver<Work>,
     ui: mpsc::Sender<BackendEvent>,
 ) {
     let mut logout_requested = false;
     let mut work_open = true;
-    loop {
+    let mut backend_open = true;
+    // Ends once the backend has stopped *and* the command pump is gone, so
+    // commands sent to a dead backend still get their failure events. The UI
+    // sees the event stream end only after a requested shutdown completed.
+    while work_open || backend_open {
         tokio::select! {
             biased;
             job = work.recv(), if work_open => match job {
-                Some(StoreWork { command, done }) => {
-                    for event in apply_command(&store, &command, &mut logout_requested) {
-                        let _ = ui.send(event).await;
-                    }
+                Some(Work::Command { command, done }) => {
+                    let out = apply_command(&store, &command, &mut logout_requested);
+                    forward(&ui, out).await;
                     let _ = done.send(());
+                }
+                Some(Work::Event(event)) => {
+                    let out = persist(&store, event, &mut logout_requested);
+                    forward(&ui, out).await;
                 }
                 None => work_open = false,
             },
-            event = backend.recv() => match event {
+            event = backend.recv(), if backend_open => match event {
                 Some(event) => {
-                    if let Err(e) = apply_event(&store, &event, &mut logout_requested) {
-                        tracing::error!("failed to persist {}: {e:#}", event_name(&event));
-                        let _ = ui.send(BackendEvent::Error(format!("Storage error: {e:#}"))).await;
-                    }
-                    if ui.send(event).await.is_err() {
-                        tracing::debug!("UI event receiver dropped");
-                    }
+                    let out = persist(&store, event, &mut logout_requested);
+                    forward(&ui, out).await;
                 }
                 // Every backend sender is gone: the backend has stopped.
-                None => break,
+                None => backend_open = false,
             },
+        }
+    }
+}
+
+/// Persists an event; returns the events to forward (a storage error, if
+/// any, followed by the event itself). Synchronous so no `&Store` is held
+/// across an await (the store is not `Sync`).
+fn persist(store: &Store, event: BackendEvent, logout_requested: &mut bool) -> Vec<BackendEvent> {
+    let mut out = Vec::with_capacity(2);
+    if let Err(e) = apply_event(store, &event, logout_requested) {
+        tracing::error!("failed to persist {}: {e:#}", event_name(&event));
+        out.push(BackendEvent::Error(format!("Storage error: {e:#}")));
+    }
+    out.push(event);
+    out
+}
+
+async fn forward(ui: &mpsc::Sender<BackendEvent>, events: Vec<BackendEvent>) {
+    for event in events {
+        if ui.send(event).await.is_err() {
+            tracing::debug!("UI event receiver dropped");
         }
     }
 }
@@ -311,6 +387,12 @@ mod tests {
         apply_event(&store, &failed, &mut logout).unwrap();
         let status = store.message(&chat, &local_id).unwrap().unwrap().status;
         assert_eq!(status, MessageStatus::Failed);
+        // Retry reuses the failed message's id: the same row goes back to
+        // Pending instead of a duplicate bubble appearing.
+        apply_command(&store, &send, &mut logout);
+        let status = store.message(&chat, &local_id).unwrap().unwrap().status;
+        assert_eq!(status, MessageStatus::Pending);
+        assert_eq!(store.messages(&chat, None, 50).unwrap().len(), 1);
     }
 
     #[test]
