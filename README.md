@@ -58,9 +58,6 @@ single binary that follows your COSMIC theme and accent colour.
 - 🗄️ All history in a local SQLite database; media cached on disk; data directories are owner-only
 - 🚪 **Log out** unlinks the device and wipes everything local
 
-### 🚧 Not yet
-Video calls · group calls · multiple accounts
-
 ## Build and run
 
 Requires stable Rust (1.94 or newer), `cmake` (for the bundled Opus build), the
