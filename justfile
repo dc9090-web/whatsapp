@@ -31,9 +31,10 @@ install:
     for size in 16 24 32 48 64 128 256 512; do \
         install -Dm0644 resources/icons/hicolor/${size}x${size}/apps/{{app_id}}.png {{base}}/share/icons/hicolor/${size}x${size}/apps/{{app_id}}.png; \
     done
+    install -Dm0644 resources/icons/hicolor/scalable/apps/{{app_id}}.svg {{base}}/share/icons/hicolor/scalable/apps/{{app_id}}.svg
 
 uninstall:
-    rm -f {{base}}/bin/{{bin}} {{base}}/share/applications/{{app_id}}.desktop {{base}}/share/metainfo/{{app_id}}.metainfo.xml {{base}}/share/icons/hicolor/*/apps/{{app_id}}.png
+    rm -f {{base}}/bin/{{bin}} {{base}}/share/applications/{{app_id}}.desktop {{base}}/share/metainfo/{{app_id}}.metainfo.xml {{base}}/share/icons/hicolor/*/apps/{{app_id}}.png {{base}}/share/icons/hicolor/scalable/apps/{{app_id}}.svg
 
 # Install for the current user only (no root): ~/.local/bin and ~/.local/share.
 # The desktop entry gets the absolute binary path so the dock can launch it
@@ -47,9 +48,10 @@ install-user: build
     for size in 16 24 32 48 64 128 256 512; do \
         install -Dm0644 resources/icons/hicolor/${size}x${size}/apps/{{app_id}}.png ~/.local/share/icons/hicolor/${size}x${size}/apps/{{app_id}}.png; \
     done
+    install -Dm0644 resources/icons/hicolor/scalable/apps/{{app_id}}.svg ~/.local/share/icons/hicolor/scalable/apps/{{app_id}}.svg
     -update-desktop-database ~/.local/share/applications
     -gtk-update-icon-cache -q -t ~/.local/share/icons/hicolor
 
 uninstall-user:
-    rm -f ~/.local/bin/{{bin}} ~/.local/share/applications/{{app_id}}.desktop ~/.local/share/metainfo/{{app_id}}.metainfo.xml ~/.local/share/icons/hicolor/*/apps/{{app_id}}.png
+    rm -f ~/.local/bin/{{bin}} ~/.local/share/applications/{{app_id}}.desktop ~/.local/share/metainfo/{{app_id}}.metainfo.xml ~/.local/share/icons/hicolor/*/apps/{{app_id}}.png ~/.local/share/icons/hicolor/scalable/apps/{{app_id}}.svg
     -update-desktop-database ~/.local/share/applications
