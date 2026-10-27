@@ -1,0 +1,18 @@
+[package]
+name = "wa-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "whatsapp-cosmic"
+path = "src/main.rs"
+
+[dependencies]
+wa-core.workspace = true
+wa-desktop.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+libcosmic.workspace = true

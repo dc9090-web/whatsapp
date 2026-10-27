@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/wa-core", "crates/wa-desktop", "crates/wa-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+wa-core = { path = "crates/wa-core" }
+wa-desktop = { path = "crates/wa-desktop" }
+anyhow = "1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs"] }
+tracing = "0.1"
+# `simd` (on by default in 0.7.0) needs nightly portable_simd, so defaults are off.
+whatsapp-rust = { version = "0.7", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native"] }
+libcosmic = { git = "https://github.com/pop-os/libcosmic", rev = "8990a058e1deb8f9f7f4c0a42f6b1362fa1437ec", default-features = false, features = ["winit", "wayland", "tokio", "multi-window", "wgpu", "dbus-config", "a11y"] }
