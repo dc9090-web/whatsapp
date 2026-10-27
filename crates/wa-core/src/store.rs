@@ -9,39 +9,99 @@
 
 use std::path::Path;
 
-use crate::model::{Chat, ChatId, Message, MessageId, MessageStatus, Reaction};
+use anyhow::Context as _;
+use rusqlite::{OptionalExtension as _, Row, params};
+
+use crate::model::{
+    Chat, ChatId, ChatKind, Message, MessageContent, MessageId, MessageStatus, QuotedMessage,
+    Reaction,
+};
+
+const SCHEMA: &str = include_str!("store/schema.sql");
+
+const MESSAGE_COLUMNS: &str =
+    "id, chat, sender, sender_name, from_me, ts, content, reply_to, status";
+const CHAT_COLUMNS: &str = "id, kind, name, last_activity, unread, muted, last_preview";
 
 pub struct Store {
-    #[allow(dead_code)]
     conn: rusqlite::Connection,
 }
 
 impl Store {
     /// Opens (creating and migrating if needed) the database at `path`, in WAL mode.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
-        let _ = path;
-        todo!("Task 2")
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        let conn = rusqlite::Connection::open(path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        Self::init(conn)
     }
 
     pub fn open_in_memory() -> anyhow::Result<Self> {
-        todo!("Task 2")
+        Self::init(rusqlite::Connection::open_in_memory()?)
+    }
+
+    fn init(conn: rusqlite::Connection) -> anyhow::Result<Self> {
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        // In-memory databases report "memory" here; that is fine.
+        let _mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
+        conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
+        conn.execute_batch(SCHEMA).context("applying schema")?;
+        Ok(Self { conn })
     }
 
     /// Inserts or replaces chat metadata. Preserves the existing `unread`,
     /// `last_activity` and `last_preview` if the incoming values are older/empty.
     pub fn upsert_chat(&self, chat: &Chat) -> anyhow::Result<()> {
-        let _ = chat;
-        todo!("Task 2")
+        // Incoming activity at least as new as ours wins for unread/preview;
+        // an empty preview never overwrites a known one.
+        self.conn.execute(
+            "INSERT INTO chats (id, kind, name, last_activity, unread, muted, last_preview)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+               kind = excluded.kind,
+               name = excluded.name,
+               muted = excluded.muted,
+               unread = CASE
+                 WHEN excluded.last_activity > 0
+                  AND excluded.last_activity >= chats.last_activity
+                 THEN excluded.unread ELSE chats.unread END,
+               last_preview = CASE
+                 WHEN excluded.last_activity >= chats.last_activity
+                  AND excluded.last_preview IS NOT NULL AND excluded.last_preview <> ''
+                 THEN excluded.last_preview ELSE chats.last_preview END,
+               last_activity = MAX(chats.last_activity, excluded.last_activity)",
+            params![
+                chat.id.0,
+                kind_to_str(chat.kind),
+                chat.name,
+                chat.last_activity,
+                chat.unread,
+                chat.muted,
+                chat.last_preview.as_deref().filter(|p| !p.is_empty()),
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn chat(&self, id: &ChatId) -> anyhow::Result<Option<Chat>> {
-        let _ = id;
-        todo!("Task 2")
+        let sql = format!("SELECT {CHAT_COLUMNS} FROM chats WHERE id = ?1");
+        Ok(self
+            .conn
+            .query_row(&sql, params![id.0], row_to_chat)
+            .optional()?)
     }
 
     /// All chats, most recent `last_activity` first.
     pub fn chats(&self) -> anyhow::Result<Vec<Chat>> {
-        todo!("Task 2")
+        let sql = format!(
+            "SELECT {CHAT_COLUMNS} FROM chats ORDER BY last_activity DESC, name COLLATE NOCASE"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map([], row_to_chat)?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Idempotent on `(chat, id)`. Returns `true` if the message was new.
@@ -50,13 +110,88 @@ impl Store {
     /// and increments `unread` when `!from_me`.
     /// When it already exists: updates content/status but never downgrades status.
     pub fn upsert_message(&self, msg: &Message) -> anyhow::Result<bool> {
-        let _ = msg;
-        todo!("Task 2")
+        let tx = self.conn.unchecked_transaction()?;
+        let existing = load_message(&tx, &msg.chat, &msg.id)?;
+        let reply_to = msg
+            .reply_to
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+
+        let new = match existing {
+            Some(old) => {
+                let mut content = msg.content.clone();
+                // Keep an already downloaded file when the message is re-delivered
+                // (history sync) without one.
+                if let (Some(old_media), Some(new_media)) =
+                    (old.content.media(), content.media_mut())
+                    && new_media.local_path.is_none()
+                {
+                    new_media.local_path.clone_from(&old_media.local_path);
+                }
+                let status = merge_status(old.status, msg.status);
+                tx.execute(
+                    "UPDATE messages SET sender = ?3, sender_name = COALESCE(?4, sender_name),
+                       content = ?5, reply_to = COALESCE(?6, reply_to), status = ?7
+                     WHERE chat = ?1 AND id = ?2",
+                    params![
+                        msg.chat.0,
+                        msg.id.0,
+                        msg.sender,
+                        msg.sender_name,
+                        serde_json::to_string(&content)?,
+                        reply_to,
+                        status_to_str(status)?,
+                    ],
+                )?;
+                false
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO messages
+                       (chat, id, sender, sender_name, from_me, ts, content, reply_to, status)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        msg.chat.0,
+                        msg.id.0,
+                        msg.sender,
+                        msg.sender_name,
+                        msg.from_me,
+                        msg.timestamp,
+                        serde_json::to_string(&msg.content)?,
+                        reply_to,
+                        status_to_str(msg.status)?,
+                    ],
+                )?;
+                let kind = if msg.chat.is_group() {
+                    ChatKind::Group
+                } else {
+                    ChatKind::Direct
+                };
+                tx.execute(
+                    "INSERT OR IGNORE INTO chats (id, kind, name) VALUES (?1, ?2, ?3)",
+                    params![msg.chat.0, kind_to_str(kind), msg.chat.user()],
+                )?;
+                tx.execute(
+                    "UPDATE chats SET last_activity = ?2, last_preview = ?3
+                     WHERE id = ?1 AND last_activity <= ?2",
+                    params![msg.chat.0, msg.timestamp, msg.content.preview()],
+                )?;
+                if !msg.from_me {
+                    tx.execute(
+                        "UPDATE chats SET unread = unread + 1 WHERE id = ?1",
+                        params![msg.chat.0],
+                    )?;
+                }
+                true
+            }
+        };
+        tx.commit()?;
+        Ok(new)
     }
 
     pub fn message(&self, chat: &ChatId, id: &MessageId) -> anyhow::Result<Option<Message>> {
-        let _ = (chat, id);
-        todo!("Task 2")
+        load_message(&self.conn, chat, id)
     }
 
     /// Up to `limit` messages strictly older than `before` (unix ms), or the newest
@@ -67,8 +202,23 @@ impl Store {
         before: Option<i64>,
         limit: usize,
     ) -> anyhow::Result<Vec<Message>> {
-        let _ = (chat, before, limit);
-        todo!("Task 2")
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages
+             WHERE chat = ?1 AND ts < ?2
+             ORDER BY ts DESC, rowid DESC LIMIT ?3"
+        );
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(
+            params![chat.0, before.unwrap_or(i64::MAX), limit],
+            row_to_raw_message,
+        )?;
+        let mut out = Vec::new();
+        for raw in rows {
+            out.push(raw?.decode()?);
+        }
+        out.reverse();
+        Ok(out)
     }
 
     /// Sets status, except that it never moves backwards (Read stays Read),
@@ -79,8 +229,23 @@ impl Store {
         id: &MessageId,
         status: MessageStatus,
     ) -> anyhow::Result<()> {
-        let _ = (chat, id, status);
-        todo!("Task 2")
+        let tx = self.conn.unchecked_transaction()?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT status FROM messages WHERE chat = ?1 AND id = ?2",
+                params![chat.0, id.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(current) = current {
+            let merged = merge_status(status_from_str(&current)?, status);
+            tx.execute(
+                "UPDATE messages SET status = ?3 WHERE chat = ?1 AND id = ?2",
+                params![chat.0, id.0, status_to_str(merged)?],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Re-keys an optimistic message (and its reactions) once the server id is known.
@@ -90,46 +255,581 @@ impl Store {
         old: &MessageId,
         new: &MessageId,
     ) -> anyhow::Result<()> {
-        let _ = (chat, old, new);
-        todo!("Task 2")
+        if old == new {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let new_exists = tx
+            .query_row(
+                "SELECT 1 FROM messages WHERE chat = ?1 AND id = ?2",
+                params![chat.0, new.0],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if new_exists {
+            // The server copy already arrived (e.g. echoed back); drop the optimistic one.
+            tx.execute(
+                "DELETE FROM messages WHERE chat = ?1 AND id = ?2",
+                params![chat.0, old.0],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE messages SET id = ?3 WHERE chat = ?1 AND id = ?2",
+                params![chat.0, old.0, new.0],
+            )?;
+        }
+        tx.execute(
+            "UPDATE OR REPLACE reactions SET target = ?3 WHERE chat = ?1 AND target = ?2",
+            params![chat.0, old.0, new.0],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Upsert keyed by `(chat, target, sender)`; an empty emoji deletes the row.
     pub fn apply_reaction(&self, reaction: &Reaction) -> anyhow::Result<()> {
-        let _ = reaction;
-        todo!("Task 2")
+        if reaction.emoji.is_empty() {
+            self.conn.execute(
+                "DELETE FROM reactions WHERE chat = ?1 AND target = ?2 AND sender = ?3",
+                params![reaction.chat.0, reaction.target.0, reaction.sender],
+            )?;
+        } else {
+            self.conn.execute(
+                "INSERT INTO reactions (chat, target, sender, emoji, ts)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(chat, target, sender) DO UPDATE SET
+                   emoji = excluded.emoji, ts = excluded.ts",
+                params![
+                    reaction.chat.0,
+                    reaction.target.0,
+                    reaction.sender,
+                    reaction.emoji,
+                    reaction.timestamp
+                ],
+            )?;
+        }
+        Ok(())
     }
 
     pub fn reactions(&self, chat: &ChatId, target: &MessageId) -> anyhow::Result<Vec<Reaction>> {
-        let _ = (chat, target);
-        todo!("Task 2")
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT chat, target, sender, emoji, ts FROM reactions
+             WHERE chat = ?1 AND target = ?2 ORDER BY ts, sender",
+        )?;
+        let rows = stmt.query_map(params![chat.0, target.0], |r| {
+            Ok(Reaction {
+                chat: ChatId(r.get(0)?),
+                target: MessageId(r.get(1)?),
+                sender: r.get(2)?,
+                emoji: r.get(3)?,
+                timestamp: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Records where the decrypted media file lives (updates `MediaRef::local_path`).
-    pub fn set_media_path(
-        &self,
-        chat: &ChatId,
-        id: &MessageId,
-        path: &Path,
-    ) -> anyhow::Result<()> {
-        let _ = (chat, id, path);
-        todo!("Task 2")
+    pub fn set_media_path(&self, chat: &ChatId, id: &MessageId, path: &Path) -> anyhow::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let content: Option<String> = tx
+            .query_row(
+                "SELECT content FROM messages WHERE chat = ?1 AND id = ?2",
+                params![chat.0, id.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(content) = content else {
+            anyhow::bail!("set_media_path: no message {} in {}", id.0, chat.0);
+        };
+        let mut content: MessageContent = serde_json::from_str(&content)?;
+        let Some(media) = content.media_mut() else {
+            anyhow::bail!("set_media_path: message {} has no media", id.0);
+        };
+        media.local_path = Some(path.to_path_buf());
+        tx.execute(
+            "UPDATE messages SET content = ?3 WHERE chat = ?1 AND id = ?2",
+            params![chat.0, id.0, serde_json::to_string(&content)?],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Sets the chat's unread count to 0.
     pub fn mark_read(&self, chat: &ChatId) -> anyhow::Result<()> {
-        let _ = chat;
-        todo!("Task 2")
+        self.conn
+            .execute("UPDATE chats SET unread = 0 WHERE id = ?1", params![chat.0])?;
+        Ok(())
     }
 
     /// Sum of `unread` over non-muted chats (tray badge).
     pub fn total_unread(&self) -> anyhow::Result<u32> {
-        todo!("Task 2")
+        let total: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(unread), 0) FROM chats WHERE muted = 0",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(u32::try_from(total.max(0)).unwrap_or(u32::MAX))
     }
 
     /// Deletes all rows (used by explicit Log out).
     pub fn wipe(&self) -> anyhow::Result<()> {
-        todo!("Task 2")
+        self.conn.execute_batch(
+            "BEGIN; DELETE FROM reactions; DELETE FROM messages; DELETE FROM chats; COMMIT;",
+        )?;
+        Ok(())
     }
 }
 
+/// Never moves a status backwards, except `Pending` ↔ `Failed` (failure / retry).
+fn merge_status(current: MessageStatus, incoming: MessageStatus) -> MessageStatus {
+    use MessageStatus::{Failed, Pending};
+    match (current, incoming) {
+        (Pending, Failed) | (Failed, Pending) => incoming,
+        _ => current.max(incoming),
+    }
+}
+
+fn kind_to_str(kind: ChatKind) -> &'static str {
+    match kind {
+        ChatKind::Direct => "direct",
+        ChatKind::Group => "group",
+    }
+}
+
+fn status_to_str(status: MessageStatus) -> anyhow::Result<String> {
+    Ok(serde_json::to_string(&status)?)
+}
+
+fn status_from_str(s: &str) -> anyhow::Result<MessageStatus> {
+    serde_json::from_str(s).with_context(|| format!("bad status {s:?}"))
+}
+
+fn row_to_chat(r: &Row<'_>) -> rusqlite::Result<Chat> {
+    let id: String = r.get(0)?;
+    let kind: String = r.get(1)?;
+    let unread: i64 = r.get(4)?;
+    Ok(Chat {
+        kind: match kind.as_str() {
+            "group" => ChatKind::Group,
+            "direct" => ChatKind::Direct,
+            _ if id.ends_with("@g.us") => ChatKind::Group,
+            _ => ChatKind::Direct,
+        },
+        id: ChatId(id),
+        name: r.get(2)?,
+        last_activity: r.get(3)?,
+        unread: u32::try_from(unread.max(0)).unwrap_or(u32::MAX),
+        muted: r.get(5)?,
+        last_preview: r.get(6)?,
+    })
+}
+
+/// A message row with its JSON columns still undecoded, so decode errors can
+/// be reported as `anyhow` errors rather than squeezed into `rusqlite::Error`.
+struct RawMessage {
+    id: String,
+    chat: String,
+    sender: String,
+    sender_name: Option<String>,
+    from_me: bool,
+    ts: i64,
+    content: String,
+    reply_to: Option<String>,
+    status: String,
+}
+
+impl RawMessage {
+    fn decode(self) -> anyhow::Result<Message> {
+        let content: MessageContent = serde_json::from_str(&self.content)
+            .with_context(|| format!("decoding content of message {}", self.id))?;
+        let reply_to: Option<QuotedMessage> = self
+            .reply_to
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?;
+        Ok(Message {
+            id: MessageId(self.id),
+            chat: ChatId(self.chat),
+            sender: self.sender,
+            sender_name: self.sender_name,
+            from_me: self.from_me,
+            timestamp: self.ts,
+            content,
+            reply_to,
+            status: status_from_str(&self.status)?,
+        })
+    }
+}
+
+fn row_to_raw_message(r: &Row<'_>) -> rusqlite::Result<RawMessage> {
+    Ok(RawMessage {
+        id: r.get(0)?,
+        chat: r.get(1)?,
+        sender: r.get(2)?,
+        sender_name: r.get(3)?,
+        from_me: r.get(4)?,
+        ts: r.get(5)?,
+        content: r.get(6)?,
+        reply_to: r.get(7)?,
+        status: r.get(8)?,
+    })
+}
+
+fn load_message(
+    conn: &rusqlite::Connection,
+    chat: &ChatId,
+    id: &MessageId,
+) -> anyhow::Result<Option<Message>> {
+    let sql = format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE chat = ?1 AND id = ?2");
+    let raw = conn
+        .query_row(&sql, params![chat.0, id.0], row_to_raw_message)
+        .optional()?;
+    raw.map(RawMessage::decode).transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{ChatKind, MediaRef, MessageContent};
+
+    fn direct() -> ChatId {
+        ChatId("15551234567@s.whatsapp.net".into())
+    }
+
+    fn msg(chat: &ChatId, id: &str, ts: i64, from_me: bool, text: &str) -> Message {
+        Message {
+            id: MessageId(id.into()),
+            chat: chat.clone(),
+            sender: if from_me {
+                String::new()
+            } else {
+                chat.0.clone()
+            },
+            sender_name: None,
+            from_me,
+            timestamp: ts,
+            content: MessageContent::Text(text.into()),
+            reply_to: None,
+            status: if from_me {
+                MessageStatus::Sent
+            } else {
+                MessageStatus::Received
+            },
+        }
+    }
+
+    fn chat(id: &str, name: &str, last_activity: i64, unread: u32, muted: bool) -> Chat {
+        Chat {
+            id: ChatId(id.into()),
+            kind: if id.ends_with("@g.us") {
+                ChatKind::Group
+            } else {
+                ChatKind::Direct
+            },
+            name: name.into(),
+            last_activity,
+            unread,
+            muted,
+            last_preview: None,
+        }
+    }
+
+    #[test]
+    fn upsert_message_is_idempotent() {
+        let s = Store::open_in_memory().unwrap();
+        let m = msg(&direct(), "A", 100, false, "hi");
+        assert!(s.upsert_message(&m).unwrap());
+        assert!(!s.upsert_message(&m).unwrap());
+        assert_eq!(s.messages(&direct(), None, 50).unwrap().len(), 1);
+        assert_eq!(s.chat(&direct()).unwrap().unwrap().unread, 1);
+    }
+
+    #[test]
+    fn upsert_creates_placeholder_chat() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_message(&msg(&direct(), "A", 100, false, "hi"))
+            .unwrap();
+        let c = s.chat(&direct()).unwrap().unwrap();
+        assert_eq!(c.name, "15551234567");
+        assert_eq!(c.kind, ChatKind::Direct);
+        assert_eq!(c.last_preview.as_deref(), Some("hi"));
+
+        let g = ChatId("120363000000000001@g.us".into());
+        s.upsert_message(&msg(&g, "B", 100, false, "yo")).unwrap();
+        assert_eq!(s.chat(&g).unwrap().unwrap().kind, ChatKind::Group);
+    }
+
+    #[test]
+    fn from_me_does_not_increment_unread() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_message(&msg(&direct(), "A", 100, true, "hi"))
+            .unwrap();
+        assert_eq!(s.chat(&direct()).unwrap().unwrap().unread, 0);
+    }
+
+    #[test]
+    fn older_message_does_not_bump_last_activity() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_message(&msg(&direct(), "new", 200, false, "newer"))
+            .unwrap();
+        s.upsert_message(&msg(&direct(), "old", 100, false, "older"))
+            .unwrap();
+        let c = s.chat(&direct()).unwrap().unwrap();
+        assert_eq!(c.last_activity, 200);
+        assert_eq!(c.last_preview.as_deref(), Some("newer"));
+        assert_eq!(c.unread, 2);
+    }
+
+    #[test]
+    fn upsert_chat_preserves_newer_activity_and_unread() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_message(&msg(&direct(), "A", 500, false, "latest"))
+            .unwrap();
+        s.upsert_chat(&chat(&direct().0, "Alice", 0, 0, true))
+            .unwrap();
+        let c = s.chat(&direct()).unwrap().unwrap();
+        assert_eq!(c.name, "Alice");
+        assert!(c.muted);
+        assert_eq!(c.last_activity, 500);
+        assert_eq!(c.unread, 1);
+        assert_eq!(c.last_preview.as_deref(), Some("latest"));
+
+        let mut newer = chat(&direct().0, "Alice B", 900, 4, false);
+        newer.last_preview = Some("from sync".into());
+        s.upsert_chat(&newer).unwrap();
+        let c = s.chat(&direct()).unwrap().unwrap();
+        assert_eq!(c.last_activity, 900);
+        assert_eq!(c.unread, 4);
+        assert_eq!(c.last_preview.as_deref(), Some("from sync"));
+    }
+
+    #[test]
+    fn chats_sorted_by_recent_activity() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_chat(&chat("a@s.whatsapp.net", "A", 10, 0, false))
+            .unwrap();
+        s.upsert_chat(&chat("b@s.whatsapp.net", "B", 30, 0, false))
+            .unwrap();
+        s.upsert_chat(&chat("c@g.us", "C", 20, 0, false)).unwrap();
+        let names: Vec<_> = s.chats().unwrap().into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["B", "C", "A"]);
+    }
+
+    #[test]
+    fn messages_pagination() {
+        let s = Store::open_in_memory().unwrap();
+        for ts in 1..=120 {
+            s.upsert_message(&msg(&direct(), &format!("m{ts}"), ts, ts % 2 == 0, "x"))
+                .unwrap();
+        }
+        let ts = |v: Vec<Message>| v.into_iter().map(|m| m.timestamp).collect::<Vec<_>>();
+        assert_eq!(
+            ts(s.messages(&direct(), None, 50).unwrap()),
+            (71..=120).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            ts(s.messages(&direct(), Some(71), 50).unwrap()),
+            (21..=70).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            ts(s.messages(&direct(), Some(21), 50).unwrap()),
+            (1..=20).collect::<Vec<_>>()
+        );
+        assert!(s.messages(&direct(), Some(1), 50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn status_never_downgrades() {
+        let s = Store::open_in_memory().unwrap();
+        let c = direct();
+        let id = MessageId("A".into());
+        let status = |s: &Store| s.message(&c, &id).unwrap().unwrap().status;
+
+        let mut m = msg(&c, "A", 1, true, "hi");
+        m.status = MessageStatus::Read;
+        s.upsert_message(&m).unwrap();
+        s.set_status(&c, &id, MessageStatus::Delivered).unwrap();
+        assert_eq!(status(&s), MessageStatus::Read);
+        // Re-upsert with an older status keeps Read too.
+        m.status = MessageStatus::Sent;
+        s.upsert_message(&m).unwrap();
+        assert_eq!(status(&s), MessageStatus::Read);
+
+        let id = MessageId("B".into());
+        let status = |s: &Store| s.message(&c, &id).unwrap().unwrap().status;
+        let mut m = msg(&c, "B", 2, true, "hi");
+        m.status = MessageStatus::Pending;
+        s.upsert_message(&m).unwrap();
+        s.set_status(&c, &id, MessageStatus::Failed).unwrap();
+        assert_eq!(status(&s), MessageStatus::Failed);
+        s.set_status(&c, &id, MessageStatus::Pending).unwrap();
+        assert_eq!(status(&s), MessageStatus::Pending);
+        s.set_status(&c, &id, MessageStatus::Delivered).unwrap();
+        assert_eq!(status(&s), MessageStatus::Delivered);
+        s.set_status(&c, &id, MessageStatus::Failed).unwrap();
+        assert_eq!(status(&s), MessageStatus::Delivered);
+    }
+
+    #[test]
+    fn set_status_on_unknown_message_is_ok() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_status(&direct(), &MessageId("nope".into()), MessageStatus::Read)
+            .unwrap();
+    }
+
+    #[test]
+    fn replace_message_id_rekeys_message_and_reactions() {
+        let s = Store::open_in_memory().unwrap();
+        let c = direct();
+        let old = MessageId::new_local();
+        let new = MessageId("SERVER1".into());
+        let mut m = msg(&c, &old.0, 5, true, "hello");
+        m.status = MessageStatus::Pending;
+        s.upsert_message(&m).unwrap();
+        s.apply_reaction(&Reaction {
+            chat: c.clone(),
+            target: old.clone(),
+            sender: "me".into(),
+            emoji: "👍".into(),
+            timestamp: 6,
+        })
+        .unwrap();
+        s.replace_message_id(&c, &old, &new).unwrap();
+        assert!(s.message(&c, &old).unwrap().is_none());
+        let got = s.message(&c, &new).unwrap().unwrap();
+        assert_eq!(got.id, new);
+        assert_eq!(got.content, MessageContent::Text("hello".into()));
+        assert!(s.reactions(&c, &old).unwrap().is_empty());
+        assert_eq!(s.reactions(&c, &new).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn replace_message_id_when_new_already_exists_drops_old() {
+        let s = Store::open_in_memory().unwrap();
+        let c = direct();
+        s.upsert_message(&msg(&c, "local-1", 5, true, "hello"))
+            .unwrap();
+        s.upsert_message(&msg(&c, "SERVER1", 5, true, "hello"))
+            .unwrap();
+        s.replace_message_id(
+            &c,
+            &MessageId("local-1".into()),
+            &MessageId("SERVER1".into()),
+        )
+        .unwrap();
+        assert_eq!(s.messages(&c, None, 50).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reaction_upsert_and_removal() {
+        let s = Store::open_in_memory().unwrap();
+        let c = direct();
+        let t = MessageId("A".into());
+        let r = |emoji: &str, ts| Reaction {
+            chat: c.clone(),
+            target: t.clone(),
+            sender: "bob".into(),
+            emoji: emoji.into(),
+            timestamp: ts,
+        };
+        s.apply_reaction(&r("👍", 1)).unwrap();
+        s.apply_reaction(&r("❤️", 2)).unwrap();
+        let got = s.reactions(&c, &t).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], r("❤️", 2));
+        s.apply_reaction(&r("", 3)).unwrap();
+        assert!(s.reactions(&c, &t).unwrap().is_empty());
+    }
+
+    #[test]
+    fn set_media_path_updates_local_path() {
+        let s = Store::open_in_memory().unwrap();
+        let c = direct();
+        let mut m = msg(&c, "IMG", 1, false, "");
+        m.content = MessageContent::Image {
+            caption: Some("look".into()),
+            media: MediaRef {
+                mime: "image/jpeg".into(),
+                size: 1234,
+                thumbnail: Some(vec![1, 2, 3]),
+                local_path: None,
+                download_token: vec![9, 9],
+            },
+        };
+        s.upsert_message(&m).unwrap();
+        let path = Path::new("/tmp/media/IMG.jpg");
+        s.set_media_path(&c, &m.id, path).unwrap();
+        let got = s.message(&c, &m.id).unwrap().unwrap();
+        assert_eq!(
+            got.content.media().unwrap().local_path.as_deref(),
+            Some(path)
+        );
+        // A later re-delivery without local_path (e.g. history sync) keeps it.
+        s.upsert_message(&m).unwrap();
+        let got = s.message(&c, &m.id).unwrap().unwrap();
+        assert_eq!(
+            got.content.media().unwrap().local_path.as_deref(),
+            Some(path)
+        );
+    }
+
+    #[test]
+    fn mark_read_and_total_unread_ignores_muted() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_chat(&chat("a@s.whatsapp.net", "A", 1, 3, false))
+            .unwrap();
+        s.upsert_chat(&chat("b@g.us", "B", 1, 5, true)).unwrap();
+        s.upsert_chat(&chat("c@s.whatsapp.net", "C", 1, 2, false))
+            .unwrap();
+        assert_eq!(s.total_unread().unwrap(), 5);
+        s.mark_read(&ChatId("a@s.whatsapp.net".into())).unwrap();
+        assert_eq!(
+            s.chat(&ChatId("a@s.whatsapp.net".into()))
+                .unwrap()
+                .unwrap()
+                .unread,
+            0
+        );
+        assert_eq!(s.total_unread().unwrap(), 2);
+    }
+
+    #[test]
+    fn wipe_clears_everything() {
+        let s = Store::open_in_memory().unwrap();
+        let c = direct();
+        s.upsert_message(&msg(&c, "A", 1, false, "x")).unwrap();
+        s.apply_reaction(&Reaction {
+            chat: c.clone(),
+            target: MessageId("A".into()),
+            sender: "x".into(),
+            emoji: "😂".into(),
+            timestamp: 1,
+        })
+        .unwrap();
+        s.wipe().unwrap();
+        assert!(s.chats().unwrap().is_empty());
+        assert!(s.messages(&c, None, 50).unwrap().is_empty());
+        assert!(s.reactions(&c, &MessageId("A".into())).unwrap().is_empty());
+    }
+
+    #[test]
+    fn open_file_db_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        {
+            let s = Store::open(&path).unwrap();
+            s.upsert_message(&msg(&direct(), "A", 1, false, "persist me"))
+                .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let got = s
+            .message(&direct(), &MessageId("A".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.content, MessageContent::Text("persist me".into()));
+        // A second concurrent handle works too (WAL).
+        let s2 = Store::open(&path).unwrap();
+        assert_eq!(s2.chats().unwrap().len(), 1);
+    }
+}
