@@ -82,6 +82,7 @@ pub enum Message {
     Audio(AudioEvent),
 
     SelectChat(ChatId),
+    OpenStatus,
     SearchChanged(String),
     ClearSearch,
     FocusSearch,
@@ -188,6 +189,8 @@ pub struct App {
     /// Chat-list search box contents and the matching messages.
     pub search: String,
     pub search_results: Vec<wa_core::Message>,
+    /// Contacts with a status update in the last 24 hours.
+    pub status_senders: usize,
     /// Message outlined after jumping to it from a search result.
     pub highlight: Option<MessageId>,
     pub conversation: Option<Conversation>,
@@ -326,6 +329,7 @@ impl App {
             composer: String::new(),
             search: String::new(),
             search_results: Vec::new(),
+            status_senders: 0,
             highlight: None,
             attachments: VecDeque::new(),
             preparing: false,
@@ -399,10 +403,24 @@ impl App {
         let chats = store.chats();
         let total = store.total_unread();
         let avatars = store.chat_avatars();
+        let updates = store.messages(&ChatId::status(), None, 300);
         match chats {
-            Ok(chats) => self.chats = chats,
+            Ok(chats) => {
+                self.chats = chats;
+                // Status updates have their own page, not a chat row.
+                self.chats.retain(|c| !c.id.is_status());
+            }
             Err(err) => self.store_error("Failed to load chats", err),
         }
+        self.status_senders = match updates {
+            Ok(updates) => {
+                pages::status::by_sender(&updates, chrono::Utc::now().timestamp_millis()).len()
+            }
+            Err(err) => {
+                tracing::error!(?err, "failed to load status updates");
+                0
+            }
+        };
         match avatars {
             Ok(avatars) => self.avatars = avatars,
             Err(err) => tracing::error!(?err, "failed to load profile pictures"),
@@ -434,7 +452,11 @@ impl App {
             .chats
             .iter()
             .map(|c| c.id.clone())
-            .filter(|id| !self.avatars.contains_key(id) && !self.avatars_requested.contains(id))
+            .filter(|id| {
+                !id.is_status()
+                    && !self.avatars.contains_key(id)
+                    && !self.avatars_requested.contains(id)
+            })
             .take(PER_RELOAD)
             .collect();
         for chat in wanted {
@@ -672,7 +694,19 @@ impl App {
             .iter()
             .find(|c| c.id == id)
             .cloned()
-            .or_else(|| self.store.as_ref().and_then(|s| s.chat(&id).ok().flatten()));
+            .or_else(|| self.store.as_ref().and_then(|s| s.chat(&id).ok().flatten()))
+            // The status page exists even before any update has arrived.
+            .or_else(|| {
+                id.is_status().then(|| wa_core::Chat {
+                    id: id.clone(),
+                    kind: wa_core::ChatKind::Direct,
+                    name: "Status".to_owned(),
+                    last_activity: 0,
+                    unread: 0,
+                    muted: true,
+                    last_preview: None,
+                })
+            });
         let Some(chat) = chat else {
             tracing::warn!(chat = %id.0, "cannot open unknown chat");
             return Task::none();
@@ -1030,7 +1064,7 @@ impl App {
     }
 
     fn maybe_notify(&self, msg: &wa_core::Message) -> Task<Message> {
-        if self.page != Page::Main {
+        if self.page != Page::Main || msg.chat.is_status() {
             return Task::none();
         }
         let chat = self
@@ -1471,15 +1505,19 @@ impl Application for App {
             }
 
             Message::SelectChat(id) => self.open_chat(id),
+            Message::OpenStatus => self.open_chat(ChatId::status()),
             Message::SearchChanged(query) => {
                 self.search = query;
                 self.search_results = match (&self.store, self.search.trim()) {
-                    (Some(store), q) if q.chars().count() >= 2 => {
-                        store.search_messages(q, 50).unwrap_or_else(|err| {
+                    (Some(store), q) if q.chars().count() >= 2 => store
+                        .search_messages(q, 50)
+                        .unwrap_or_else(|err| {
                             tracing::error!(?err, "search failed");
                             Vec::new()
                         })
-                    }
+                        .into_iter()
+                        .filter(|m| !m.chat.is_status())
+                        .collect(),
                     _ => Vec::new(),
                 };
                 Task::none()

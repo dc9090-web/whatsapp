@@ -609,6 +609,24 @@ fn demo_script(now: i64) -> Vec<BackendEvent> {
 
     let mut chats = Vec::new();
 
+    // Status updates (stories): a pseudo-chat the UI shows on its own page.
+    // One of them is older than a day and so must not be shown.
+    let mut status = DemoChat::new(crate::model::STATUS_CHAT, "Status", "S0");
+    status.text(
+        Who::Them(&ALICE),
+        now - 3 * 3_600_000,
+        "Sunset run done 🌅 legs are jelly",
+    );
+    status.add(
+        Who::Them(&BEN),
+        now - 5 * 3_600_000,
+        image(Some("New bike day 🚴")),
+    );
+    status.text(Who::Them(&ALICE), now - 2 * 3_600_000, "Coffee?");
+    status.text(Who::Me(Read), now - 3_600_000, "Weekend plans: sorted.");
+    status.text(Who::Them(&CARLA), now - 26 * 3_600_000, "yesterday's news");
+    chats.push(status);
+
     // 1:1, active a few minutes ago, two unread.
     let mut alice = DemoChat::new(ALICE.jid, ALICE.name, "A1");
     alice.text(

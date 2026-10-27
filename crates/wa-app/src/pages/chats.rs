@@ -5,7 +5,7 @@ use cosmic::iced::widget::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget::{self, button, container, icon, mouse_area, popover};
 use cosmic::{Element, theme};
-use wa_core::Chat;
+use wa_core::{Chat, ChatId};
 
 use crate::app::{App, Message};
 use crate::widgets::{self, list_row_class};
@@ -119,9 +119,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .align_y(Alignment::Center)
         .into()
     } else {
-        let mut column = widget::column::with_capacity(app.chats.len())
+        let mut column = widget::column::with_capacity(app.chats.len() + 1)
             .spacing(space.space_xxxs)
             .padding([space.space_xxs, space.space_xs]);
+        column = column.push(status_row(app));
         for chat in &app.chats {
             let selected = app.selected.as_ref() == Some(&chat.id);
             let picture = app.avatars.get(&chat.id).map(std::path::PathBuf::as_path);
@@ -137,6 +138,55 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .push(search)
         .push(list)
         .height(Length::Fill)
+        .into()
+}
+
+/// The "Status" entry at the top of the list.
+fn status_row(app: &App) -> Element<'_, Message> {
+    let space = theme::spacing();
+    let selected = app.selected.as_ref().is_some_and(ChatId::is_status);
+    let has_updates = app.status_senders > 0;
+    let ring = container(icon::from_name("camera-photo-symbolic").size(20))
+        .width(Length::Fixed(44.0))
+        .height(Length::Fixed(44.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .class(theme::Container::custom(move |theme| {
+            let cosmic = theme.cosmic();
+            container::Style {
+                background: Some(cosmic::iced::Background::Color(widgets::with_alpha(
+                    cosmic.accent_color().into(),
+                    0.18,
+                ))),
+                border: cosmic::iced::Border {
+                    radius: 22.0.into(),
+                    width: if has_updates { 2.0 } else { 0.0 },
+                    color: cosmic.accent_color().into(),
+                },
+                ..container::Style::default()
+            }
+        }));
+    let caption = match app.status_senders {
+        0 => "No recent updates".to_owned(),
+        1 => "1 contact posted an update".to_owned(),
+        n => format!("{n} contacts posted updates"),
+    };
+    let content = widget::row::with_capacity(2)
+        .spacing(space.space_s)
+        .align_y(Alignment::Center)
+        .push(ring)
+        .push(
+            widget::column::with_capacity(2)
+                .spacing(space.space_xxxs)
+                .width(Length::Fill)
+                .push(widget::text::body("Status").font(cosmic::font::semibold()))
+                .push(widget::text::caption(caption).class(theme::Text::Custom(widgets::dim_text))),
+        );
+    button::custom(content)
+        .width(Length::Fill)
+        .padding([space.space_xs, space.space_s])
+        .class(list_row_class(selected))
+        .on_press(Message::OpenStatus)
         .into()
 }
 

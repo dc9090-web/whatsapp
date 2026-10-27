@@ -106,10 +106,11 @@ pub fn chat_id_from_source(src: &MessageSource, lids: &LidMap) -> ChatId {
     chat_id_for(&src.chat, alt, lids)
 }
 
-/// Whether a live chat should be shown at all (status updates and channels
-/// are out of scope for v1).
+/// Whether a live chat should be handled at all. Status updates come through
+/// as the `status@broadcast` pseudo-chat; channels and broadcast lists are
+/// out of scope.
 pub fn is_supported_chat(chat: &Jid) -> bool {
-    !chat.is_status_broadcast() && !chat.is_newsletter() && !chat.is_broadcast_list()
+    !chat.is_newsletter() && !chat.is_broadcast_list()
 }
 
 pub fn meta_from_info(info: &MessageInfo, own_jid: &str, lids: &LidMap) -> MsgMeta {
@@ -1676,7 +1677,8 @@ mod tests {
             &LidMap::new(),
             1_700_000_000_000,
         );
-        assert_eq!(batch.chats.len(), 2);
+        assert_eq!(batch.chats.len(), 3, "the status pseudo-chat is kept");
+        assert!(batch.chats[2].0.id.is_status());
         let (group, name) = &batch.chats[0];
         assert_eq!(group.id, ChatId("120363000000000001@g.us".into()));
         assert_eq!(group.kind, ChatKind::Group);

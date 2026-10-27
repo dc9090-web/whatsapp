@@ -135,6 +135,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let Some(conv) = &app.conversation else {
         return empty_state();
     };
+    if conv.chat.id.is_status() {
+        return crate::pages::status::view(app);
+    }
     let space = theme::spacing();
 
     let mut column = widget::column::with_capacity(4)
@@ -353,7 +356,7 @@ fn reply_banner<'a>(
 const COMPOSER_HEIGHT: f32 = 40.0;
 
 /// The queued attachment, shown above the composer until it is sent.
-fn attachment_strip(app: &App) -> Option<Element<'_, Message>> {
+pub(crate) fn attachment_strip(app: &App) -> Option<Element<'_, Message>> {
     let space = theme::spacing();
     let path = app.attachments.front()?;
     let (kind, _) = attach::classify(path);

@@ -18,9 +18,21 @@ pub struct ChatId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MessageId(pub String);
 
+/// The pseudo-chat WhatsApp delivers status updates (stories) in.
+pub const STATUS_CHAT: &str = "status@broadcast";
+
 impl ChatId {
     pub fn is_group(&self) -> bool {
         self.0.ends_with("@g.us")
+    }
+
+    /// The status-updates pseudo-chat.
+    pub fn is_status(&self) -> bool {
+        self.0 == STATUS_CHAT
+    }
+
+    pub fn status() -> Self {
+        Self(STATUS_CHAT.to_owned())
     }
 
     /// The user part of the JID, used as a fallback display name.

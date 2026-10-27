@@ -1051,6 +1051,9 @@ async fn send_text(
     text: String,
     reply_to: Option<MessageId>,
 ) -> anyhow::Result<String> {
+    if chat.is_status() {
+        return post_status_text(shared, client, &text).await;
+    }
     let to = parse_jid(chat)?;
     let message = match quote_context(shared, client, chat, reply_to, &to) {
         Some(ctx) => wa::Message::text_with_context(text, ctx),
@@ -1096,6 +1099,119 @@ fn quote_context(
     ))
 }
 
+/// Everyone a status update is shared with: the direct chats we know.
+fn status_recipients(shared: &Shared) -> anyhow::Result<Vec<Jid>> {
+    let recipients: Vec<Jid> = lock(&shared.index)
+        .known_direct_chats()?
+        .iter()
+        .filter_map(|c| c.0.parse::<Jid>().ok())
+        .collect();
+    if recipients.is_empty() {
+        anyhow::bail!("no contacts to share the status with yet");
+    }
+    Ok(recipients)
+}
+
+/// Background colour of text statuses (WhatsApp's teal).
+const STATUS_TEXT_BACKGROUND: u32 = 0xFF00_5C4B;
+
+async fn post_status_text(
+    shared: &Shared,
+    client: &Arc<Client>,
+    text: &str,
+) -> anyhow::Result<String> {
+    let recipients = status_recipients(shared)?;
+    let result = client
+        .status()
+        .send_text(
+            text,
+            STATUS_TEXT_BACKGROUND,
+            wa::message::extended_text_message::FontType::SYSTEM,
+            &recipients,
+            whatsapp_rust::StatusSendOptions::default(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("status not posted: {e}"))?;
+    remember_own_status(shared, client, &result.message_id, &wa::Message::text(text));
+    Ok(result.message_id)
+}
+
+async fn post_status_media(
+    shared: &Shared,
+    client: &Arc<Client>,
+    data: Vec<u8>,
+    media: OutgoingMedia,
+) -> anyhow::Result<String> {
+    use crate::model::MediaKind;
+    use whatsapp_rust::wacore::download::MediaType;
+    let recipients = status_recipients(shared)?;
+    let thumbnail = media.thumbnail.clone().unwrap_or_default();
+    let caption = media.caption.clone();
+    let status = client.status();
+    let result = match media.kind {
+        MediaKind::Image => {
+            let upload = client
+                .upload(
+                    data,
+                    MediaType::Image,
+                    whatsapp_rust::upload::UploadOptions::new(),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("upload failed: {e:#}"))?;
+            status
+                .send_image(
+                    upload,
+                    thumbnail,
+                    caption.as_deref(),
+                    &recipients,
+                    whatsapp_rust::StatusSendOptions::default(),
+                )
+                .await
+        }
+        MediaKind::Video => {
+            let upload = client
+                .upload(
+                    data,
+                    MediaType::Video,
+                    whatsapp_rust::upload::UploadOptions::new(),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("upload failed: {e:#}"))?;
+            status
+                .send_video(
+                    upload,
+                    thumbnail,
+                    0,
+                    caption.as_deref(),
+                    &recipients,
+                    whatsapp_rust::StatusSendOptions::default(),
+                )
+                .await
+        }
+        MediaKind::Audio | MediaKind::Document => {
+            anyhow::bail!("only photos and videos can be posted as a status")
+        }
+    }
+    .map_err(|e| anyhow::anyhow!("status not posted: {e}"))?;
+    remember_own_status(shared, client, &result.message_id, &wa::Message::default());
+    Ok(result.message_id)
+}
+
+/// Keys for our own status posts, so a later revoke/receipt can find them.
+fn remember_own_status(shared: &Shared, client: &Arc<Client>, id: &str, message: &wa::Message) {
+    let own = own_jid(client);
+    let meta = convert::MsgMeta {
+        id: id.to_owned(),
+        chat: ChatId::status(),
+        sender: own.clone(),
+        sender_name: None,
+        from_me: true,
+        timestamp: now_ms(),
+        status: crate::model::MessageStatus::Sent,
+    };
+    shared.put_keys(&[convert::key_record(&meta, message, &own)]);
+}
+
 /// A file the UI prepared for sending.
 struct OutgoingMedia {
     path: PathBuf,
@@ -1119,10 +1235,13 @@ async fn send_media(
     use whatsapp_rust::media::{self, AudioOptions, DocumentOptions, ImageOptions, VideoOptions};
     use whatsapp_rust::wacore::download::MediaType;
 
-    let to = parse_jid(chat)?;
     let data = tokio::fs::read(&media.path)
         .await
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", media.path.display()))?;
+    if chat.is_status() {
+        return post_status_media(shared, client, data, media).await;
+    }
+    let to = parse_jid(chat)?;
     let media_type = match media.kind {
         MediaKind::Image => MediaType::Image,
         MediaKind::Video => MediaType::Video,

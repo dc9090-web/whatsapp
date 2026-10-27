@@ -132,6 +132,15 @@ impl Index {
             .unwrap_or_default())
     }
 
+    /// Direct chats the UI knows about: the people a status is shared with.
+    pub fn known_direct_chats(&self) -> anyhow::Result<Vec<ChatId>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT chat FROM chat_meta WHERE known = 1 AND chat LIKE '%@s.whatsapp.net'",
+        )?;
+        let rows = stmt.query_map([], |r| Ok(ChatId(r.get(0)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     fn ensure_row(&self, chat: &ChatId) -> anyhow::Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO chat_meta (chat) VALUES (?1)",
