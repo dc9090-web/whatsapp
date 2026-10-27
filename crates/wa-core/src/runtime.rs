@@ -150,6 +150,7 @@ fn rejected(command: BackendCommand) -> Option<BackendEvent> {
             message,
             error: WHY.to_owned(),
         }),
+        BackendCommand::FetchAvatar { chat } => Some(BackendEvent::AvatarMissing { chat }),
         BackendCommand::React { .. } | BackendCommand::Logout => {
             Some(BackendEvent::Error(format!("Not done: {WHY}")))
         }
@@ -281,6 +282,7 @@ fn apply_command(
         }
         BackendCommand::React { .. }
         | BackendCommand::FetchMedia { .. }
+        | BackendCommand::FetchAvatar { .. }
         | BackendCommand::Shutdown => Vec::new(),
     }
 }
@@ -317,6 +319,7 @@ fn apply_event(
             message,
             path,
         } => store.set_media_path(chat, message, path),
+        BackendEvent::AvatarReady { chat, path } => store.set_chat_avatar(chat, path),
         BackendEvent::LoggedOut => {
             if std::mem::take(logout_requested) {
                 store.wipe()
@@ -330,6 +333,7 @@ fn apply_event(
         | BackendEvent::SyncProgress(_)
         | BackendEvent::SyncDone
         | BackendEvent::MediaFailed { .. }
+        | BackendEvent::AvatarMissing { .. }
         | BackendEvent::Error(_) => Ok(()),
     }
 }
@@ -350,6 +354,8 @@ fn event_name(event: &BackendEvent) -> &'static str {
         BackendEvent::Reaction(_) => "Reaction",
         BackendEvent::MediaReady { .. } => "MediaReady",
         BackendEvent::MediaFailed { .. } => "MediaFailed",
+        BackendEvent::AvatarReady { .. } => "AvatarReady",
+        BackendEvent::AvatarMissing { .. } => "AvatarMissing",
         BackendEvent::Error(_) => "Error",
     }
 }

@@ -7,7 +7,8 @@
 //! CONTRACT (implemented in Task 2): signatures below are fixed — other crates
 //! are written against them in parallel.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use rusqlite::{OptionalExtension as _, Row, params};
@@ -49,7 +50,28 @@ impl Store {
         let _mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
         conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
         conn.execute_batch(SCHEMA).context("applying schema")?;
+        migrate(&conn).context("migrating schema")?;
         Ok(Self { conn })
+    }
+
+    /// Records where the chat's downloaded profile picture lives.
+    pub fn set_chat_avatar(&self, chat: &ChatId, path: &Path) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE chats SET avatar_path = ?2 WHERE id = ?1",
+            params![chat.0, path.to_string_lossy()],
+        )?;
+        Ok(())
+    }
+
+    /// Every chat that has a downloaded profile picture.
+    pub fn chat_avatars(&self) -> anyhow::Result<HashMap<ChatId, PathBuf>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id, avatar_path FROM chats WHERE avatar_path IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((ChatId(r.get(0)?), PathBuf::from(r.get::<_, String>(1)?)))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Inserts or replaces chat metadata. Preserves the existing `unread`,
@@ -461,6 +483,18 @@ fn status_to_str(status: MessageStatus) -> anyhow::Result<String> {
 
 fn status_from_str(s: &str) -> anyhow::Result<MessageStatus> {
     serde_json::from_str(s).with_context(|| format!("bad status {s:?}"))
+}
+
+/// Additive upgrades for databases created before a column existed.
+fn migrate(conn: &rusqlite::Connection) -> anyhow::Result<()> {
+    let has_avatar = conn
+        .prepare("PRAGMA table_info(chats)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .any(|c| c.is_ok_and(|c| c == "avatar_path"));
+    if !has_avatar {
+        conn.execute_batch("ALTER TABLE chats ADD COLUMN avatar_path TEXT;")?;
+    }
+    Ok(())
 }
 
 fn row_to_chat(r: &Row<'_>) -> rusqlite::Result<Chat> {
@@ -919,6 +953,42 @@ mod tests {
         assert!(s.chats().unwrap().is_empty());
         assert!(s.messages(&c, None, 50).unwrap().is_empty());
         assert!(s.reactions(&c, &MessageId("A".into())).unwrap().is_empty());
+    }
+
+    #[test]
+    fn chat_avatars_round_trip_and_survive_upsert() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.chat_avatars().unwrap().is_empty());
+        s.upsert_chat(&chat(&direct().0, "Alice", 10, 0, false))
+            .unwrap();
+        s.set_chat_avatar(&direct(), Path::new("/tmp/a.jpg"))
+            .unwrap();
+        // A later chat upsert must not clear the picture.
+        s.upsert_chat(&chat(&direct().0, "Alice B", 20, 1, false))
+            .unwrap();
+        let avatars = s.chat_avatars().unwrap();
+        assert_eq!(avatars.get(&direct()), Some(&PathBuf::from("/tmp/a.jpg")));
+        // Unknown chat: no row, no error.
+        s.set_chat_avatar(&ChatId("nobody@s.whatsapp.net".into()), Path::new("/x"))
+            .unwrap();
+        assert_eq!(s.chat_avatars().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn old_database_gains_avatar_column() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chats (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
+             last_activity INTEGER NOT NULL DEFAULT 0, unread INTEGER NOT NULL DEFAULT 0,
+             muted INTEGER NOT NULL DEFAULT 0, last_preview TEXT);",
+        )
+        .unwrap();
+        let s = Store::init(conn).unwrap();
+        s.upsert_chat(&chat(&direct().0, "Alice", 10, 0, false))
+            .unwrap();
+        s.set_chat_avatar(&direct(), Path::new("/tmp/a.jpg"))
+            .unwrap();
+        assert_eq!(s.chat_avatars().unwrap().len(), 1);
     }
 
     #[test]

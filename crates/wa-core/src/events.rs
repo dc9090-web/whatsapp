@@ -30,6 +30,10 @@ pub enum BackendCommand {
         message: MessageId,
         media: MediaRef,
     },
+    /// Fetch the chat's (contact or group) profile picture.
+    FetchAvatar {
+        chat: ChatId,
+    },
     /// Unlink this device from the account.
     Logout,
     Shutdown,
@@ -88,6 +92,16 @@ pub enum BackendEvent {
         chat: ChatId,
         message: MessageId,
         error: String,
+    },
+    /// The chat's profile picture was downloaded to `path` (a JPEG).
+    AvatarReady {
+        chat: ChatId,
+        path: PathBuf,
+    },
+    /// The chat has no picture we may see (none set, hidden by privacy, or
+    /// the lookup failed); the UI should not ask again this session.
+    AvatarMissing {
+        chat: ChatId,
     },
     Error(String),
 }

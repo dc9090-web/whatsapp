@@ -22,6 +22,11 @@ pub const SAMPLE_STICKER_WEBP: &[u8] = include_bytes!("../../assets/sticker.webp
 pub const SAMPLE_OGG_OPUS: &[u8] = include_bytes!("../../assets/sample.ogg");
 /// A one-page PDF, served for demo documents.
 pub const SAMPLE_PDF: &[u8] = include_bytes!("../../assets/sample.pdf");
+/// Two 160×160 JPEG profile pictures, served for some demo chats.
+pub const SAMPLE_AVATARS: [&[u8]; 2] = [
+    include_bytes!("../../assets/avatar-1.jpg"),
+    include_bytes!("../../assets/avatar-2.jpg"),
+];
 
 /// `download_token` prefix understood by [`FakeBackend`]'s `FetchMedia`.
 const TOKEN_PREFIX: &str = "fake-asset:";
@@ -150,11 +155,40 @@ impl WhatsAppBackend for FakeBackend {
                         let _ = events.send(event).await;
                     });
                 }
+                BackendCommand::FetchAvatar { chat } => {
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        let event = match fetch_avatar(&chat).await {
+                            Ok(Some(path)) => BackendEvent::AvatarReady { chat, path },
+                            Ok(None) => BackendEvent::AvatarMissing { chat },
+                            Err(e) => {
+                                tracing::warn!("demo avatar failed: {e:#}");
+                                BackendEvent::AvatarMissing { chat }
+                            }
+                        };
+                        let _ = events.send(event).await;
+                    });
+                }
                 BackendCommand::MarkRead { .. } => {}
             }
         }
         Ok(())
     }
+}
+
+/// Demo chats whose JID ends in an odd digit have a picture; the rest do not.
+async fn fetch_avatar(chat: &ChatId) -> anyhow::Result<Option<PathBuf>> {
+    let last = chat.user().bytes().last().unwrap_or(b'0');
+    if !last.is_ascii_digit() || last.is_multiple_of(2) {
+        return Ok(None);
+    }
+    let bytes = SAMPLE_AVATARS[usize::from((last - b'0') / 2 % 2)];
+    let dir = std::env::temp_dir().join("whatsapp-cosmic-fake-media");
+    tokio::fs::create_dir_all(&dir).await?;
+    let path = dir.join(format!("avatar-{}.jpg", chat.user()));
+    tokio::fs::write(&path, bytes).await?;
+    Ok(Some(path))
 }
 
 /// Picks the bundled asset for `media` (by its `fake-asset:` token, else by

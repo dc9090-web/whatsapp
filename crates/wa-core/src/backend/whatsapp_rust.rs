@@ -410,6 +410,9 @@ async fn reject(shared: &Shared, cmd: BackendCommand, why: &str) {
                 })
                 .await;
         }
+        BackendCommand::FetchAvatar { chat } => {
+            shared.emit(BackendEvent::AvatarMissing { chat }).await;
+        }
         BackendCommand::React { .. } => {
             shared
                 .emit(BackendEvent::Error(format!("Reaction not sent: {why}")))
@@ -639,6 +642,10 @@ async fn handle_command(shared: &Arc<Shared>, client: &Arc<Client>, cmd: Backend
                 };
                 shared.emit(ev).await;
             });
+        }
+        BackendCommand::FetchAvatar { chat } => {
+            // TODO(avatars): look the picture up and download it; see FetchMedia.
+            shared.emit(BackendEvent::AvatarMissing { chat }).await;
         }
         // Handled by the session loop.
         BackendCommand::Logout | BackendCommand::Shutdown => {}
