@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::model::{Chat, ChatId, Message, MessageId, MessageStatus, Reaction};
+use crate::model::{Chat, ChatId, MediaRef, Message, MessageId, MessageStatus, Reaction};
 
 /// UI → backend.
 #[derive(Debug, Clone, PartialEq)]
@@ -13,7 +13,7 @@ pub enum BackendCommand {
     React { chat: ChatId, target: MessageId, emoji: String },
     MarkRead { chat: ChatId, messages: Vec<MessageId> },
     /// Download and decrypt the full media file of a stored message.
-    FetchMedia { chat: ChatId, message: MessageId },
+    FetchMedia { chat: ChatId, message: MessageId, media: MediaRef },
     /// Unlink this device from the account.
     Logout,
     Shutdown,
