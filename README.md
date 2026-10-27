@@ -1,5 +1,11 @@
 # WhatsApp for COSMIC
 
+[![Rust](https://img.shields.io/badge/Rust-stable-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![libcosmic](https://img.shields.io/badge/UI-libcosmic-6f42c1)](https://github.com/pop-os/libcosmic)
+[![Wayland](https://img.shields.io/badge/Wayland-native-1f8dd6)](https://wayland.freedesktop.org)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+[![Unofficial](https://img.shields.io/badge/WhatsApp-unofficial%20client-25D366?logo=whatsapp&logoColor=white)](#)
+
 An unofficial, native WhatsApp client for the [COSMIC](https://github.com/pop-os/cosmic-epoch)
 desktop, written in Rust with [libcosmic](https://github.com/pop-os/libcosmic).
 It pairs with your phone as a *linked device* (the same mechanism as WhatsApp
@@ -13,55 +19,42 @@ single binary that follows your COSMIC theme and accent colour.
 > WhatsApp or Meta. Unofficial clients violate the WhatsApp Terms of Service and
 > accounts have been banned for using them. Use it at your own risk.
 
-## Features
+## ✨ Features
 
-**Messaging**
-- QR-code pairing as a linked device; the session survives restarts and
-  reconnects on its own after network drops
-- Chat list for direct chats and groups, with profile pictures, unread counts,
-  mute state and the last message preview
-- Conversations with quoted replies, group sender names, date separators and
-  infinite scroll-back through local history
-- Send text (with replies); optimistic sending with delivery status icons:
-  sending → sent → delivered → read, plus retry when a send fails
-- Reactions: see everyone's, add your own from a quick bar or the full emoji
-  picker, remove them again
-- Read receipts are sent when you open a chat; reading on your phone clears
-  the unread count here too
-- Delete messages from the right-click menu: for you (synced to your phone)
-  or, for your own messages, for everyone; delete whole chats from the chat
-  list the same way
+### 💬 Messaging
+- 🔗 **Linked-device pairing** — scan a QR code once; the session survives restarts and reconnects on its own after network drops
+- 👤 **Chat list** for direct chats and groups, with profile pictures, unread counts, mute state and the last message preview
+- 🧵 **Conversations** with quoted replies, group sender names, date separators and infinite scroll-back through local history
+- ✈️ **Send text** (with replies) — optimistic sending with clear status icons: 🕓 sending → ✓ sent → ✓✓ delivered → ✓✓ read, plus retry when a send fails
+- ❤️ **Reactions** — see everyone's, add your own from a quick bar or the full emoji picker, remove them again
+- 👀 **Read receipts** are sent when you open a chat; reading on your phone clears the unread count here too
+- 🗑️ **Delete** messages from the right-click menu — for you (synced to your phone) or, for your own messages, for everyone — and delete whole chats from the chat list
 
-**Media**
-- Images and stickers shown inline (small previews first, full image fetched
-  automatically), with a full-size viewer
-- Voice notes and audio with in-app playback (OGG/Opus)
-- Documents and videos with download/open
-- **Save to Downloads** on every image, video and document, named the way
-  WhatsApp names files (`WhatsApp Image 2026-10-27 at 2.02 PM.jpg`)
+### 🖼️ Media
+- 📷 **Images and stickers** inline (small previews first, full image fetched automatically), with a full-size viewer
+- 🎙️ **Voice notes and audio** with in-app playback (OGG/Opus)
+- 📄 **Documents and videos** with download and open
+- ⬇️ **Save to Downloads** on every image, video and document, named the way WhatsApp names files (`WhatsApp Image 2026-10-27 at 2.02 PM.jpg`)
 
-**Desktop integration**
-- Desktop notifications for new messages through COSMIC's notification
-  daemon, with the sender's picture; one per chat that updates in place;
-  clicking one opens the chat; previews optional
-- A WhatsApp-style new-message chime (can be turned off in Settings)
-- Proper app icon for the COSMIC app library and dock
-- Optional start at login
-- Graceful shutdown on window close, SIGTERM (logout) and SIGINT
+### 🖥️ Desktop integration
+- 🔔 **Notifications** through COSMIC's notification daemon, with the sender's picture; one per chat that updates in place; click to open the chat; previews optional
+- 🔊 **New-message chime** — the WhatsApp sound, with a Settings toggle
+- 🧩 **App icon** for the COSMIC app library and dock
+- 🚀 **Start at login** (optional)
+- 🛑 **Graceful shutdown** on window close, SIGTERM (logout) and SIGINT
 
-**Look and feel**
-- Dark theme by default, with Light and Match-system options
-- Real colour emoji everywhere
-- 12-hour clock, short dates ("12 Jan 2026")
-- Outgoing bubbles tinted with your COSMIC accent colour
+### 🎨 Look and feel
+- 🌙 **Dark theme by default**, with Light and Match-system options
+- 😀 **Real colour emoji** everywhere
+- 🕐 **12-hour clock** and short dates ("12 Jan 2026")
+- 🎯 **Accent-tinted** outgoing bubbles that follow your COSMIC accent colour
 
-**Data**
-- All history in a local SQLite database; media cached on disk; data
-  directories are owner-only
-- "Log out" unlinks the device and wipes everything local
+### 🔒 Data
+- 🗄️ All history in a local SQLite database; media cached on disk; data directories are owner-only
+- 🚪 **Log out** unlinks the device and wipes everything local
 
-Not supported (yet): voice/video calls, status/stories, sending media,
-search, creating or administering groups, multiple accounts.
+### 🚧 Not yet
+Voice/video calls · status/stories · sending media · search · creating or administering groups · multiple accounts
 
 ## Build and run
 
