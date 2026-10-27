@@ -9,7 +9,7 @@ license.workspace = true
 anyhow.workspace = true
 dirs = "7.0.0"
 # Both use zbus on the tokio executor: no libdbus, no extra async-io executor.
-notify-rust = { version = "4.18.2", default-features = false, features = ["z-with-tokio"] }
+notify-rust = { version = "4.18.2", default-features = false, features = ["z-with-tokio", "images"] }
 tokio.workspace = true
 tracing.workspace = true
 

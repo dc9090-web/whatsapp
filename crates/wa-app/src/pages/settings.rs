@@ -27,11 +27,18 @@ pub fn view(app: &App) -> Element<'_, Message> {
         }),
     ));
 
-    let notifications = settings::section().title("Notifications").add(
-        settings::item::builder("Message previews")
-            .description("Show the message text in notifications")
-            .toggler(app.config.notification_previews, Message::SetPreviews),
-    );
+    let notifications = settings::section()
+        .title("Notifications")
+        .add(
+            settings::item::builder("Message previews")
+                .description("Show the message text in notifications")
+                .toggler(app.config.notification_previews, Message::SetPreviews),
+        )
+        .add(
+            settings::item::builder("Notification sound")
+                .description("Play a chime when a message arrives")
+                .toggler(app.config.notification_sound, Message::SetSound),
+        );
 
     let startup = settings::section().title("Startup");
     let startup = match app.autostart {

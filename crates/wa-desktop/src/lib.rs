@@ -7,6 +7,7 @@
 //!     /// Shows a freedesktop notification. `body` is None when previews are off.
 //!     /// Clicking the notification sends `chat_id` on `on_click`.
 //!     pub fn show(summary: &str, body: Option<&str>, chat_id: String,
+//!                 picture: Option<&std::path::Path>,
 //!                 on_click: tokio::sync::mpsc::UnboundedSender<String>) -> anyhow::Result<()>;
 //! }
 //! pub mod autostart {

@@ -23,6 +23,8 @@ static CLICKS: OnceLock<mpsc::UnboundedSender<String>> = OnceLock::new();
 pub fn subscription() -> Subscription<DesktopEvent> {
     Subscription::run(|| {
         cosmic::iced::stream::channel(16, async |mut output| {
+            #[cfg(feature = "desktop")]
+            wa_desktop::notify::prime();
             let (click_tx, mut click_rx) = mpsc::unbounded_channel::<String>();
             let _ = CLICKS.set(click_tx);
             while let Some(chat) = click_rx.recv().await {
@@ -40,14 +42,21 @@ pub fn subscription() -> Subscription<DesktopEvent> {
 }
 
 /// Shows a notification. Must run inside the tokio runtime (call from a Task).
-pub fn notify(summary: &str, body: Option<&str>, chat_id: String) {
+pub fn notify(
+    summary: &str,
+    body: Option<&str>,
+    chat_id: String,
+    picture: Option<std::path::PathBuf>,
+) {
     #[cfg(feature = "desktop")]
     {
         let Some(on_click) = CLICKS.get().cloned() else {
             tracing::warn!("notification before desktop subscription started");
             return;
         };
-        if let Err(err) = wa_desktop::notify::show(summary, body, chat_id, on_click) {
+        if let Err(err) =
+            wa_desktop::notify::show(summary, body, chat_id, picture.as_deref(), on_click)
+        {
             tracing::warn!(?err, "failed to show notification");
         }
     }
@@ -56,6 +65,7 @@ pub fn notify(summary: &str, body: Option<&str>, chat_id: String) {
         summary,
         has_body = body.is_some(),
         chat_id,
+        has_picture = picture.is_some(),
         "notification (no desktop feature)"
     );
 }

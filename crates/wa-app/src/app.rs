@@ -97,6 +97,7 @@ pub enum Message {
     CloseSettings,
     SetAppearance(Appearance),
     SetPreviews(bool),
+    SetSound(bool),
     SetAutostart(bool),
     RequestLogout,
     ConfirmLogout,
@@ -868,8 +869,14 @@ impl App {
             }
         });
         let chat_id = msg.chat.0.clone();
+        let picture = self.avatars.get(&msg.chat).cloned();
+        if self.config.notification_sound
+            && let Some(audio) = &self.audio
+        {
+            audio.chime();
+        }
         cosmic::task::future(async move {
-            desktop::notify(&chat_name, body.as_deref(), chat_id);
+            desktop::notify(&chat_name, body.as_deref(), chat_id, picture);
             Message::None
         })
     }
@@ -1412,6 +1419,11 @@ impl Application for App {
             Message::SetAppearance(appearance) => self.apply_appearance(appearance),
             Message::SetPreviews(enabled) => {
                 self.config.notification_previews = enabled;
+                self.config.save(self.config_handler.as_ref());
+                Task::none()
+            }
+            Message::SetSound(enabled) => {
+                self.config.notification_sound = enabled;
                 self.config.save(self.config_handler.as_ref());
                 Task::none()
             }

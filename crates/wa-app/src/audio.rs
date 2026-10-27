@@ -28,11 +28,19 @@ pub enum AudioEvent {
 }
 
 enum Command {
-    Play { id: MessageId, path: PathBuf },
+    Play {
+        id: MessageId,
+        path: PathBuf,
+    },
     Pause,
     Resume,
     Stop,
+    /// Play the new-message chime (on its own channel, over any voice note).
+    Chime,
 }
+
+/// The new-message sound, Ogg/Opus, ~1.7 s.
+const CHIME: &[u8] = include_bytes!("../assets/message.ogg");
 
 /// Cheap, cloneable handle to the playback thread.
 #[derive(Clone)]
@@ -59,6 +67,10 @@ impl AudioHandle {
 
     pub fn stop(&self) {
         self.send(Command::Stop);
+    }
+
+    pub fn chime(&self) {
+        self.send(Command::Chime);
     }
 
     fn send(&self, cmd: Command) {
@@ -106,9 +118,59 @@ fn playback_thread(
     // The output device is opened lazily so idle apps hold no audio stream.
     let mut sink: Option<rodio::MixerDeviceSink> = None;
     let mut current: Option<(MessageId, rodio::Player)> = None;
+    // The chime is decoded once; it plays on its own player so a voice note
+    // keeps going underneath it.
+    let mut chime_samples: Option<(NonZero<u16>, Vec<f32>)> = None;
+    let mut chime: Option<rodio::Player> = None;
 
     loop {
         match commands.recv_timeout(Duration::from_millis(100)) {
+            Ok(Command::Chime) => {
+                if sink.is_none() {
+                    match rodio::DeviceSinkBuilder::open_default_sink() {
+                        Ok(mut s) => {
+                            s.log_on_drop(false);
+                            sink = Some(s);
+                        }
+                        Err(err) => {
+                            tracing::warn!("no audio output for the chime: {err}");
+                            continue;
+                        }
+                    }
+                }
+                let Some(device) = sink.as_ref() else {
+                    continue;
+                };
+                if chime_samples.is_none() {
+                    match decode_ogg_opus(std::io::Cursor::new(CHIME))
+                        .ok()
+                        .and_then(|(ch, samples)| NonZero::new(ch).map(|ch| (ch, samples)))
+                    {
+                        Some(decoded) => chime_samples = Some(decoded),
+                        None => {
+                            tracing::error!("embedded chime failed to decode");
+                            continue;
+                        }
+                    }
+                }
+                let Some((channels, samples)) = chime_samples.as_ref() else {
+                    continue;
+                };
+                let Some(rate) = NonZero::new(OPUS_RATE) else {
+                    continue;
+                };
+                if let Some(old) = chime.take() {
+                    old.stop();
+                }
+                let player = rodio::Player::connect_new(device.mixer());
+                player.append(rodio::buffer::SamplesBuffer::new(
+                    *channels,
+                    rate,
+                    samples.clone(),
+                ));
+                player.play();
+                chime = Some(player);
+            }
             Ok(Command::Play { id, path }) => {
                 if let Some((_, player)) = current.take() {
                     player.stop();
@@ -167,6 +229,9 @@ fn playback_thread(
             && let Some((id, _)) = current.take()
         {
             let _ = events.send(AudioEvent::Finished(id));
+        }
+        if chime.as_ref().is_some_and(rodio::Player::empty) {
+            chime = None;
         }
     }
 }
@@ -240,6 +305,15 @@ mod tests {
         assert_eq!(parse_opus_head(&opus_head(1, 312)), Some((1, 312)));
         assert_eq!(parse_opus_head(b"OggS"), None);
         assert_eq!(parse_opus_head(&opus_head(0, 0)), None);
+    }
+
+    #[test]
+    fn embedded_chime_decodes() {
+        let (channels, samples) = decode_ogg_opus(std::io::Cursor::new(CHIME)).unwrap();
+        assert_eq!(channels, 2);
+        let seconds = samples.len() as f32 / (2.0 * OPUS_RATE as f32);
+        assert!((1.5..2.0).contains(&seconds), "{seconds}s");
+        assert!(samples.iter().any(|s| s.abs() > 0.05), "silent chime");
     }
 
     #[test]

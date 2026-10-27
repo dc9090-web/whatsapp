@@ -1,5 +1,10 @@
 //! Freedesktop notifications (org.freedesktop.Notifications via zbus).
 
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use anyhow::Context as _;
 use notify_rust::{Hint, Notification, NotificationResponse};
 use tokio::sync::mpsc::UnboundedSender;
@@ -9,7 +14,46 @@ use crate::APP_ID;
 /// Maximum body length in characters (including the trailing ellipsis).
 const MAX_BODY_CHARS: usize = 200;
 
-/// Shows a freedesktop notification. `body` is None when previews are off.
+/// Whether [`prime`] has learnt the daemon's spec version. Until then
+/// pictures are left out: notify-rust resolves the version lazily with a
+/// blocking D-Bus call, which must never run on an async runtime thread.
+static SPEC_READY: AtomicBool = AtomicBool::new(false);
+
+/// Resolves the notification daemon's spec version on a plain thread.
+/// Call once at startup, from anywhere.
+pub fn prime() {
+    std::thread::Builder::new()
+        .name("notify-prime".into())
+        .spawn(|| {
+            let version = &*notify_rust::SPEC_VERSION;
+            tracing::debug!(?version, "notification daemon spec version");
+            SPEC_READY.store(true, Ordering::SeqCst);
+        })
+        .map(drop)
+        .unwrap_or_else(|e| tracing::warn!("cannot prime notification spec version: {e}"));
+}
+
+/// Last notification id per chat, so a chat's next message replaces its
+/// notification instead of stacking a new one.
+static LAST_ID: Mutex<Option<HashMap<String, u32>>> = Mutex::new(None);
+
+fn last_id(chat_id: &str) -> Option<u32> {
+    LAST_ID
+        .lock()
+        .ok()
+        .and_then(|m| m.as_ref().and_then(|m| m.get(chat_id).copied()))
+}
+
+fn remember_id(chat_id: &str, id: u32) {
+    if let Ok(mut m) = LAST_ID.lock() {
+        m.get_or_insert_with(HashMap::new)
+            .insert(chat_id.to_owned(), id);
+    }
+}
+
+/// Shows (or updates) the notification for `chat_id`. `body` is None when
+/// previews are off. `picture` is the chat's profile picture, shown beside
+/// the text by daemons that honour the image-path hint (COSMIC's does).
 /// Clicking the notification sends `chat_id` on `on_click`.
 ///
 /// Must be called from within a tokio runtime: the D-Bus round trip and the
@@ -19,6 +63,7 @@ pub fn show(
     summary: &str,
     body: Option<&str>,
     chat_id: String,
+    picture: Option<&Path>,
     on_click: UnboundedSender<String>,
 ) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Handle::try_current()
@@ -36,6 +81,18 @@ pub fn show(
     if let Some(body) = body {
         notification.body(&truncate_body(body));
     }
+    // COSMIC's daemon ignores `image-path`, so the pixels go inline
+    // (`image-data`). A picture that fails to load is simply left out.
+    if let Some(picture) = picture.filter(|p| p.is_file()) {
+        if !SPEC_READY.load(Ordering::SeqCst) {
+            tracing::debug!("notification picture skipped: spec version not known yet");
+        } else if let Err(e) = notification.image(picture) {
+            tracing::debug!(error = %e, path = %picture.display(), "notification picture skipped");
+        }
+    }
+    if let Some(previous) = last_id(&chat_id) {
+        notification.id(previous);
+    }
 
     runtime.spawn(async move {
         let handle = match notification.show_async().await {
@@ -45,6 +102,7 @@ pub fn show(
                 return;
             }
         };
+        remember_id(&chat_id, handle.id());
         handle
             .wait_for_action_async(move |response| {
                 if is_click(response) && on_click.send(chat_id).is_err() {

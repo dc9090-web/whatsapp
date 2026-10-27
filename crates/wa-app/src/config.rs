@@ -9,6 +9,7 @@ pub const CONFIG_VERSION: u64 = 1;
 
 const KEY_APPEARANCE: &str = "appearance";
 const KEY_PREVIEWS: &str = "notification_previews";
+const KEY_SOUND: &str = "notification_sound";
 
 /// Colour scheme preference. Dark is the default, as the spec requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -53,6 +54,7 @@ impl Appearance {
 pub struct Config {
     pub appearance: Appearance,
     pub notification_previews: bool,
+    pub notification_sound: bool,
 }
 
 impl Default for Config {
@@ -60,6 +62,7 @@ impl Default for Config {
         Self {
             appearance: Appearance::default(),
             notification_previews: true,
+            notification_sound: true,
         }
     }
 }
@@ -88,6 +91,9 @@ impl Config {
         if let Ok(previews) = handler.get::<bool>(KEY_PREVIEWS) {
             config.notification_previews = previews;
         }
+        if let Ok(sound) = handler.get::<bool>(KEY_SOUND) {
+            config.notification_sound = sound;
+        }
         config
     }
 
@@ -101,6 +107,9 @@ impl Config {
         if let Err(err) = handler.set(KEY_PREVIEWS, self.notification_previews) {
             tracing::error!(?err, "failed to save notification previews");
         }
+        if let Err(err) = handler.set(KEY_SOUND, self.notification_sound) {
+            tracing::error!(?err, "failed to save notification sound");
+        }
     }
 }
 
@@ -113,6 +122,7 @@ mod tests {
         assert_eq!(Appearance::default(), Appearance::Dark);
         assert_eq!(Config::default().appearance, Appearance::Dark);
         assert!(Config::default().notification_previews);
+        assert!(Config::default().notification_sound);
     }
 
     #[test]

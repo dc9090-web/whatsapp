@@ -38,8 +38,10 @@ single binary that follows your COSMIC theme and accent colour.
   WhatsApp names files (`WhatsApp Image 2026-10-27 at 2.02 PM.jpg`)
 
 **Desktop integration**
-- Desktop notifications for new messages (previews optional); clicking one
-  opens the chat
+- Desktop notifications for new messages through COSMIC's notification
+  daemon, with the sender's picture; one per chat that updates in place;
+  clicking one opens the chat; previews optional
+- A WhatsApp-style new-message chime (can be turned off in Settings)
 - Proper app icon for the COSMIC app library and dock
 - Optional start at login
 - Graceful shutdown on window close, SIGTERM (logout) and SIGINT
