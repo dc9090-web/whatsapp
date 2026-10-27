@@ -53,6 +53,9 @@ impl CommandSender {
 pub enum BackendMsg {
     Ready(CommandSender),
     Event(BackendEvent),
+    /// The runtime's event stream ended: after `Shutdown`, the backend has
+    /// finished its graceful disconnect and everything is persisted.
+    Closed,
 }
 
 pub fn subscription(config: BackendConfig) -> Subscription<BackendMsg> {
@@ -93,7 +96,8 @@ pub fn subscription(config: BackendConfig) -> Subscription<BackendMsg> {
                     break;
                 }
             }
-            tracing::warn!("backend event stream ended");
+            tracing::info!("backend event stream ended");
+            let _ = output.send(BackendMsg::Closed).await;
             std::future::pending::<()>().await;
         })
     })
