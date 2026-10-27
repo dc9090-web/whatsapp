@@ -65,7 +65,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             widget::column::with_capacity(2)
                 .spacing(space.space_xs)
                 .align_x(Alignment::Center)
-                .push(icon::from_name("mail-message-new-symbolic").size(40))
+                .push(widgets::app_logo(40))
                 .push(
                     widget::text::body("No chats yet")
                         .class(theme::Text::Custom(widgets::dim_text)),

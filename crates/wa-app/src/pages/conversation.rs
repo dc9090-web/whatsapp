@@ -156,7 +156,7 @@ fn empty_state<'a>() -> Element<'a, Message> {
         widget::column::with_capacity(3)
             .spacing(space.space_s)
             .align_x(Alignment::Center)
-            .push(icon::from_name("mail-message-new-symbolic").size(64))
+            .push(widgets::app_logo(64))
             .push(widget::text::title3("WhatsApp for COSMIC"))
             .push(
                 widget::text::body("Select a chat to start messaging")

@@ -8,6 +8,15 @@ use cosmic::iced::{Alignment, Background, Border, Color, Length};
 use cosmic::widget::{self, button, container};
 use cosmic::{Element, theme};
 
+/// The app logo, embedded so it shows even when the app is not installed.
+pub fn app_logo<'a, M: 'a>(size: u16) -> Element<'a, M> {
+    const LOGO: &[u8] =
+        include_bytes!("../../../../resources/icons/hicolor/256x256/apps/com.github.whatsapp-cosmic.png");
+    widget::icon(widget::icon::from_raster_bytes(LOGO))
+        .size(size)
+        .into()
+}
+
 /// `Color` with its alpha replaced.
 pub fn with_alpha(color: Color, alpha: f32) -> Color {
     Color { a: alpha, ..color }

@@ -7,11 +7,16 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::APP_ID;
 
-/// Icon used when the app icon is not installed in any icon theme directory.
-const FALLBACK_ICON: &str = "mail-message-new-symbolic";
+/// Themed tray icon; COSMIC recolours `-symbolic` icons to suit the panel.
+const SYMBOLIC_ICON: &str = "com.github.whatsapp-cosmic-symbolic";
 
-/// Badge edge length in pixels.
-pub const BADGE_SIZE: usize = 32;
+/// The white tray logo as raw ARGB32 (network byte order), rendered from
+/// `resources/icons/hicolor/symbolic/apps/com.github.whatsapp-cosmic-symbolic.svg`.
+const LOGO_32: &[u8] = include_bytes!("../assets/tray-logo-32.argb");
+const LOGO_64: &[u8] = include_bytes!("../assets/tray-logo-64.argb");
+
+/// Pixmap edge lengths offered to the host (1× and 2× scale).
+pub const PIXMAP_SIZES: [usize; 2] = [32, 64];
 
 /// Events emitted by the tray.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +38,7 @@ impl Tray {
         let tray = WaTray {
             events,
             unread: 0,
-            icon_name: resolve_icon_name(),
+            symbolic_installed: symbolic_icon_installed(),
         };
         let handle = tray
             .spawn()
@@ -58,7 +63,7 @@ impl Tray {
 struct WaTray {
     events: UnboundedSender<TrayEvent>,
     unread: u32,
-    icon_name: String,
+    symbolic_installed: bool,
 }
 
 impl WaTray {
@@ -68,14 +73,14 @@ impl WaTray {
         }
     }
 
-    fn badge_icons(&self) -> Vec<ksni::Icon> {
-        badge_pixmap(self.unread)
-            .map(|data| ksni::Icon {
-                width: BADGE_SIZE as i32,
-                height: BADGE_SIZE as i32,
-                data,
+    fn pixmaps(&self) -> Vec<ksni::Icon> {
+        PIXMAP_SIZES
+            .iter()
+            .map(|&size| ksni::Icon {
+                width: size as i32,
+                height: size as i32,
+                data: tray_pixmap(self.unread, size),
             })
-            .into_iter()
             .collect()
     }
 }
@@ -102,29 +107,24 @@ impl ksni::Tray for WaTray {
     }
 
     fn icon_name(&self) -> String {
-        icon_name_for(self.unread, &self.icon_name)
+        icon_name_for(self.unread, self.symbolic_installed)
     }
 
     // Hosts (cosmic-applet-status-area among them) draw `icon_name` when it
     // is set and ignore overlays/attention icons, so while there is unread
-    // mail the name is cleared and the badge pixmap *is* the icon.
+    // mail the name is cleared and the badged logo pixmap *is* the icon.
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        self.badge_icons()
+        self.pixmaps()
     }
 
     // Shown by hosts that honour NeedsAttention (e.g. KDE).
     fn attention_icon_pixmap(&self) -> Vec<ksni::Icon> {
-        self.badge_icons()
-    }
-
-    // Drawn on top of the app icon by hosts that support overlays.
-    fn overlay_icon_pixmap(&self) -> Vec<ksni::Icon> {
-        self.badge_icons()
+        self.pixmaps()
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            icon_name: self.icon_name.clone(),
+            icon_name: String::new(),
             icon_pixmap: Vec::new(),
             title: "WhatsApp".into(),
             description: tooltip_text(self.unread),
@@ -156,13 +156,13 @@ impl ksni::Tray for WaTray {
     }
 }
 
-/// The themed icon name to advertise: none while unread messages exist, so
-/// hosts fall back to the badge pixmap.
-pub(crate) fn icon_name_for(unread: u32, app_icon: &str) -> String {
-    if unread > 0 {
-        String::new()
+/// The themed icon name to advertise: none while unread messages exist (or
+/// when the icon is not installed), so hosts draw the logo pixmap instead.
+pub(crate) fn icon_name_for(unread: u32, symbolic_installed: bool) -> String {
+    if unread == 0 && symbolic_installed {
+        SYMBOLIC_ICON.to_owned()
     } else {
-        app_icon.to_owned()
+        String::new()
     }
 }
 
@@ -175,20 +175,19 @@ pub(crate) fn tooltip_text(count: u32) -> String {
     }
 }
 
-/// App icon if installed in an icon theme directory, else a stock symbolic icon.
-fn resolve_icon_name() -> String {
+/// Whether the symbolic tray icon is installed in an icon theme directory.
+fn symbolic_icon_installed() -> bool {
     let mut bases: Vec<PathBuf> = dirs::data_dir().into_iter().collect();
     let system = std::env::var("XDG_DATA_DIRS")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
     bases.extend(std::env::split_paths(&system));
-    if icon_installed_in(&bases, APP_ID) {
-        APP_ID.into()
-    } else {
-        tracing::debug!("app icon not installed; using {FALLBACK_ICON} for the tray");
-        FALLBACK_ICON.into()
+    let installed = icon_installed_in(&bases, SYMBOLIC_ICON);
+    if !installed {
+        tracing::debug!("{SYMBOLIC_ICON} not installed; using the embedded tray pixmap");
     }
+    installed
 }
 
 /// True when `name` exists as an app icon under `<base>/icons/hicolor/*/apps`
@@ -213,30 +212,39 @@ fn has_icon_file(dir: &Path, name: &str) -> bool {
         .any(|ext| dir.join(format!("{name}.{ext}")).is_file())
 }
 
-/// Renders `count` as white digits on a red circle into a 32×32 ARGB32
-/// (network byte order) buffer. `None` for 0; counts above 99 render "99+".
-pub fn badge_pixmap(count: u32) -> Option<Vec<u8>> {
+/// The white logo at `size`×`size` (32 or 64) as ARGB32 in network byte
+/// order, with a red unread badge in the bottom-right corner when `count > 0`.
+/// Counts above 99 render "99+".
+pub fn tray_pixmap(count: u32, size: usize) -> Vec<u8> {
+    let mut buf = if size == 64 { LOGO_64 } else { LOGO_32 }.to_vec();
+    let size = if size == 64 { 64 } else { 32 };
     if count == 0 {
-        return None;
+        return buf;
     }
     const RED: [u8; 4] = [0xFF, 0xD3, 0x2F, 0x2F]; // ARGB
     const WHITE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
-
-    let mut buf = vec![0u8; BADGE_SIZE * BADGE_SIZE * 4];
+    const CLEAR: [u8; 4] = [0, 0, 0, 0];
     let put = |buf: &mut [u8], x: usize, y: usize, color: [u8; 4]| {
-        if x < BADGE_SIZE && y < BADGE_SIZE {
-            let i = (y * BADGE_SIZE + x) * 4;
+        if x < size && y < size {
+            let i = (y * size + x) * 4;
             buf[i..i + 4].copy_from_slice(&color);
         }
     };
 
-    // Filled circle centred on the buffer (pixel centres at +0.5).
-    let c = BADGE_SIZE as f32 / 2.0;
-    for y in 0..BADGE_SIZE {
-        for x in 0..BADGE_SIZE {
-            let (dx, dy) = (x as f32 + 0.5 - c, y as f32 + 0.5 - c);
-            if dx * dx + dy * dy <= c * c {
+    // Badge circle covering the bottom-right half, with a thin transparent
+    // ring cut out of the logo so the badge stays legible on top of it.
+    let unit = size / 32;
+    let radius = 8.0 * unit as f32;
+    let (cx, cy) = (size as f32 - radius, size as f32 - radius);
+    let ring = radius + 1.5 * unit as f32;
+    for y in 0..size {
+        for x in 0..size {
+            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+            let d2 = dx * dx + dy * dy;
+            if d2 <= radius * radius {
                 put(&mut buf, x, y, RED);
+            } else if d2 <= ring * ring {
+                put(&mut buf, x, y, CLEAR);
             }
         }
     }
@@ -244,11 +252,11 @@ pub fn badge_pixmap(count: u32) -> Option<Vec<u8>> {
     // Glyphs: 3×5 cells scaled up, one cell of gap between glyphs.
     let glyphs: Vec<[u8; 5]> = badge_text(count).chars().filter_map(glyph).collect();
     let n = glyphs.len();
-    let scale = if n <= 2 { 3 } else { 2 };
+    let scale = if n <= 2 { 2 * unit } else { unit };
     let width = n * 3 * scale + n.saturating_sub(1) * scale;
     let height = 5 * scale;
-    let x0 = (BADGE_SIZE.saturating_sub(width)) / 2;
-    let y0 = (BADGE_SIZE.saturating_sub(height)) / 2;
+    let x0 = (cx as usize).saturating_sub(width / 2);
+    let y0 = (cy as usize).saturating_sub(height / 2);
     for (g, rows) in glyphs.iter().enumerate() {
         let gx = x0 + g * 4 * scale;
         for (row, bits) in rows.iter().enumerate() {
@@ -258,18 +266,13 @@ pub fn badge_pixmap(count: u32) -> Option<Vec<u8>> {
                 }
                 for sy in 0..scale {
                     for sx in 0..scale {
-                        put(
-                            &mut buf,
-                            gx + col * scale + sx,
-                            y0 + row * scale + sy,
-                            WHITE,
-                        );
+                        put(&mut buf, gx + col * scale + sx, y0 + row * scale + sy, WHITE);
                     }
                 }
             }
         }
     }
-    Some(buf)
+    buf
 }
 
 /// Text shown in the badge.
@@ -303,8 +306,8 @@ fn glyph(c: char) -> Option<[u8; 5]> {
 mod tests {
     use super::*;
 
-    fn pixel(buf: &[u8], x: usize, y: usize) -> [u8; 4] {
-        let i = (y * BADGE_SIZE + x) * 4;
+    fn pixel(buf: &[u8], size: usize, x: usize, y: usize) -> [u8; 4] {
+        let i = (y * size + x) * 4;
         [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
     }
 
@@ -312,37 +315,40 @@ mod tests {
         p[0] == 0xFF && p[1] > 0xA0 && p[2] < 0x60 && p[3] < 0x60
     }
 
-    fn is_white(p: [u8; 4]) -> bool {
-        p == [0xFF, 0xFF, 0xFF, 0xFF]
+    #[test]
+    fn embedded_logos_have_the_right_size() {
+        assert_eq!(LOGO_32.len(), 32 * 32 * 4);
+        assert_eq!(LOGO_64.len(), 64 * 64 * 4);
     }
 
     #[test]
-    fn zero_has_no_badge() {
-        assert!(badge_pixmap(0).is_none());
+    fn zero_unread_is_the_plain_logo() {
+        assert_eq!(tray_pixmap(0, 32), LOGO_32);
+        assert_eq!(tray_pixmap(0, 64), LOGO_64);
     }
 
     #[test]
-    fn single_digit_badge() {
-        let buf = badge_pixmap(5).expect("badge for 5");
-        assert_eq!(buf.len(), BADGE_SIZE * BADGE_SIZE * 4);
-        // Inside the circle, around the glyph: red.
-        assert!(is_red(pixel(&buf, 16, 4)), "{:?}", pixel(&buf, 16, 4));
-        assert!(is_red(pixel(&buf, 4, 16)));
-        assert!(is_red(pixel(&buf, 27, 16)));
-        // Corners lie outside the circle: fully transparent.
-        assert_eq!(pixel(&buf, 0, 0)[0], 0);
-        assert_eq!(pixel(&buf, 31, 31)[0], 0);
-        // The digit itself is white, at the centre.
-        assert!(is_white(pixel(&buf, 16, 16)));
+    fn badge_sits_bottom_right_and_keeps_the_logo_elsewhere() {
+        for size in PIXMAP_SIZES {
+            let buf = tray_pixmap(5, size);
+            assert_eq!(buf.len(), size * size * 4);
+            let u = size / 32;
+            // Inside the badge circle, beside the digit: red.
+            assert!(is_red(pixel(&buf, size, size - 3 * u, size - 8 * u)));
+            // The top-left area, beyond the badge's cut-out ring, is untouched logo.
+            for y in 0..size * 3 / 8 {
+                for x in 0..size * 3 / 8 {
+                    let logo = if size == 64 { LOGO_64 } else { LOGO_32 };
+                    assert_eq!(pixel(&buf, size, x, y), pixel(logo, size, x, y));
+                }
+            }
+        }
     }
 
     #[test]
     fn large_counts_render_99_plus() {
-        let a = badge_pixmap(100).expect("badge");
-        let b = badge_pixmap(12_345).expect("badge");
-        assert_eq!(a.len(), BADGE_SIZE * BADGE_SIZE * 4);
-        assert_eq!(a, b, "all counts > 99 render the same \"99+\" badge");
-        assert_ne!(a, badge_pixmap(99).expect("badge"));
+        assert_eq!(tray_pixmap(100, 32), tray_pixmap(12_345, 32));
+        assert_ne!(tray_pixmap(100, 32), tray_pixmap(99, 32));
         assert_eq!(badge_text(100), "99+");
         assert_eq!(badge_text(99), "99");
         assert_eq!(badge_text(7), "7");
@@ -350,14 +356,15 @@ mod tests {
 
     #[test]
     fn different_counts_render_differently() {
-        assert_ne!(badge_pixmap(1), badge_pixmap(2));
-        assert_ne!(badge_pixmap(9), badge_pixmap(10));
+        assert_ne!(tray_pixmap(1, 32), tray_pixmap(2, 32));
+        assert_ne!(tray_pixmap(9, 64), tray_pixmap(10, 64));
     }
 
     #[test]
-    fn unread_replaces_the_themed_icon_with_the_badge() {
-        assert_eq!(icon_name_for(0, APP_ID), APP_ID);
-        assert_eq!(icon_name_for(3, APP_ID), "");
+    fn themed_icon_only_when_installed_and_nothing_unread() {
+        assert_eq!(icon_name_for(0, true), SYMBOLIC_ICON);
+        assert_eq!(icon_name_for(3, true), "");
+        assert_eq!(icon_name_for(0, false), "");
     }
 
     #[test]
@@ -371,11 +378,11 @@ mod tests {
     fn icon_lookup() {
         let tmp = tempfile::tempdir().unwrap();
         let bases = vec![tmp.path().to_path_buf()];
-        assert!(!icon_installed_in(&bases, APP_ID));
-        let apps = tmp.path().join("icons/hicolor/scalable/apps");
+        assert!(!icon_installed_in(&bases, SYMBOLIC_ICON));
+        let apps = tmp.path().join("icons/hicolor/symbolic/apps");
         std::fs::create_dir_all(&apps).unwrap();
-        std::fs::write(apps.join(format!("{APP_ID}.svg")), "<svg/>").unwrap();
-        assert!(icon_installed_in(&bases, APP_ID));
+        std::fs::write(apps.join(format!("{SYMBOLIC_ICON}.svg")), "<svg/>").unwrap();
+        assert!(icon_installed_in(&bases, SYMBOLIC_ICON));
         assert!(!icon_installed_in(&bases, "something-else"));
     }
 }
