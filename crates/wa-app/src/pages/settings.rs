@@ -37,7 +37,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let startup = match app.autostart {
         Some(enabled) => startup.add(
             settings::item::builder("Start at login")
-                .description("Run in the background and keep receiving messages")
+                .description("Open WhatsApp when you log in")
                 .toggler(enabled, Message::SetAutostart),
         ),
         None => startup.add(

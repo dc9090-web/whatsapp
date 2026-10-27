@@ -10,7 +10,7 @@
       A native Rust client built with libcosmic. It links to your phone as a
       WhatsApp linked device by scanning a QR code, and supports chats and
       groups, replies, reactions, images, stickers, voice notes, documents,
-      desktop notifications and a tray icon with an unread badge.
+      desktop notifications.
     </p>
     <p>
       This is an unofficial client and is not affiliated with or endorsed by

@@ -16,7 +16,7 @@ use wa_core::{
 use crate::audio::{self, AudioEvent, AudioHandle};
 use crate::backend_sub::{self, BackendConfig, BackendMsg, CommandSender};
 use crate::config::{Appearance, Config};
-use crate::desktop::{self, DesktopEvent, TrayHandle};
+use crate::desktop::{self, DesktopEvent};
 use crate::pages::conversation::{self, Conversation, PAGE_SIZE};
 use crate::pages::{self, Page};
 use crate::signals;
@@ -104,7 +104,6 @@ pub enum Message {
 
     CloseRequested(window::Id),
     WindowClosed(window::Id),
-    HideWindow,
     Quit,
     Exit,
     None,
@@ -151,7 +150,6 @@ pub struct App {
     pub audio: Option<AudioHandle>,
     pub playing: Option<MessageId>,
     pub audio_paused: bool,
-    pub tray: Option<TrayHandle>,
     pub error: Option<String>,
     pub logout_requested: bool,
     /// Quit was requested; exit once the backend has shut down.
@@ -257,7 +255,6 @@ impl App {
             audio: None,
             playing: None,
             audio_paused: false,
-            tray: None,
             error: None,
             logout_requested: false,
             quitting: false,
@@ -291,7 +288,7 @@ impl App {
         self.error = Some(format!("{what}: {err:#}"));
     }
 
-    /// Re-reads the chat list and returns a task updating the tray badge.
+    /// Re-reads the chat list and the unread total.
     fn reload_chats(&mut self) -> Task<Message> {
         let Some(store) = &self.store else {
             return Task::none();
@@ -364,20 +361,10 @@ impl App {
         })
     }
 
-    /// Updates the cached unread total and the tray badge when it changed.
+    /// Updates the cached unread total.
     fn set_total_unread(&mut self, total: u32) -> Task<Message> {
-        let changed = total != self.total_unread;
         self.total_unread = total;
-        match (&self.tray, changed) {
-            (Some(tray), true) => {
-                let tray = tray.clone();
-                cosmic::task::future(async move {
-                    tray.set_unread(total).await;
-                    Message::None
-                })
-            }
-            _ => Task::none(),
-        }
+        Task::none()
     }
 
     /// Re-reads the open conversation, keeping at least as many messages as
@@ -1122,8 +1109,8 @@ impl Application for App {
     }
 
     fn on_app_exit(&mut self) -> Option<Message> {
-        // Header close button: hide to tray instead of quitting.
-        Some(Message::HideWindow)
+        // Header close button: quit gracefully (no tray to hide into).
+        Some(Message::Quit)
     }
 
     fn on_close_requested(&self, id: window::Id) -> Option<Message> {
@@ -1187,26 +1174,6 @@ impl Application for App {
                 }
             }
             Message::Desktop(event) => match event {
-                DesktopEvent::TrayReady(tray) => {
-                    let total = self.total_unread;
-                    self.tray = Some(tray.clone());
-                    cosmic::task::future(async move {
-                        tray.set_unread(total).await;
-                        Message::None
-                    })
-                }
-                DesktopEvent::TrayUnavailable => {
-                    self.tray = None;
-                    // `--background` without a tray would leave nothing on screen.
-                    if self.core.main_window_id().is_none() {
-                        tracing::warn!("no tray available; showing the window instead");
-                        self.show_window()
-                    } else {
-                        Task::none()
-                    }
-                }
-                DesktopEvent::Show => self.show_window(),
-                DesktopEvent::Quit => self.update(Message::Quit),
                 DesktopEvent::NotificationClicked(chat) => {
                     let show = self.show_window();
                     let open = self.open_chat(ChatId(chat));
@@ -1480,7 +1447,7 @@ impl Application for App {
 
             Message::CloseRequested(id) => {
                 if self.core.main_window_id() == Some(id) {
-                    self.update(Message::HideWindow)
+                    self.update(Message::Quit)
                 } else {
                     window::close(id)
                 }
@@ -1494,12 +1461,6 @@ impl Application for App {
                 }
                 Task::none()
             }
-            // Without a tray there is no way back to a hidden window: quit instead.
-            Message::HideWindow if self.tray.is_none() => self.update(Message::Quit),
-            Message::HideWindow => match self.core.main_window_id() {
-                Some(id) => window::close(id),
-                None => Task::none(),
-            },
             Message::Quit => {
                 if let Some(audio) = &self.audio {
                     audio.stop();

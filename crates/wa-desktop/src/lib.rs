@@ -9,27 +9,16 @@
 //!     pub fn show(summary: &str, body: Option<&str>, chat_id: String,
 //!                 on_click: tokio::sync::mpsc::UnboundedSender<String>) -> anyhow::Result<()>;
 //! }
-//! pub mod tray {
-//!     pub enum TrayEvent { Show, Quit }
-//!     pub struct Tray { /* ksni handle */ }
-//!     impl Tray {
-//!         /// Registers a StatusNotifierItem. Activate (left click) / "Show" → TrayEvent::Show.
-//!         pub async fn spawn(events: tokio::sync::mpsc::UnboundedSender<TrayEvent>) -> anyhow::Result<Tray>;
-//!         /// Updates tooltip + badge icon; 0 hides the badge.
-//!         pub async fn set_unread(&self, count: u32);
-//!     }
-//! }
 //! pub mod autostart {
 //!     pub fn is_enabled() -> bool;
 //!     /// Writes/removes ~/.config/autostart/com.github.whatsapp-cosmic.desktop
-//!     /// with `Exec=whatsapp-cosmic --background`.
+//!     /// with `Exec=whatsapp-cosmic`.
 //!     pub fn set_enabled(enabled: bool) -> anyhow::Result<()>;
 //! }
 //! ```
 
-/// Application id shared by the notification icon, tray id and autostart entry.
+/// Application id shared by the notification icon and the autostart entry.
 pub const APP_ID: &str = "com.github.whatsapp-cosmic";
 
 pub mod autostart;
 pub mod notify;
-pub mod tray;

@@ -10,7 +10,7 @@ name = "whatsapp-cosmic"
 path = "src/main.rs"
 
 [features]
-# Desktop integration (tray, notifications, autostart) via `wa-desktop`.
+# Desktop integration (notifications, autostart) via `wa-desktop`.
 default = ["desktop"]
 desktop = []
 

@@ -2,7 +2,6 @@
 //!
 //! Flags:
 //! - `--fake`        run against the scripted demo backend with a throwaway database
-//! - `--background`  start hidden with only the tray icon
 
 mod app;
 mod audio;
@@ -28,7 +27,6 @@ use crate::config::Config;
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Args {
     fake: bool,
-    background: bool,
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
@@ -36,13 +34,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     for arg in args {
         match arg.as_str() {
             "--fake" => parsed.fake = true,
-            "--background" => parsed.background = true,
             "-h" | "--help" => {
-                return Err("usage: whatsapp-cosmic [--fake] [--background]".to_owned());
+                return Err("usage: whatsapp-cosmic [--fake]".to_owned());
             }
             other => {
                 return Err(format!(
-                    "unknown argument: {other}\nusage: whatsapp-cosmic [--fake] [--background]"
+                    "unknown argument: {other}\nusage: whatsapp-cosmic [--fake]"
                 ));
             }
         }
@@ -125,7 +122,7 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    tracing::info!(fake = args.fake, background = args.background, db = %backend.app_db.display(), "starting");
+    tracing::info!(fake = args.fake, db = %backend.app_db.display(), "starting");
 
     let config_handler = Config::handler();
     let config = Config::load(config_handler.as_ref());
@@ -138,8 +135,7 @@ fn main() -> std::process::ExitCode {
                 .min_width(420.0)
                 .min_height(480.0),
         )
-        .exit_on_close(false)
-        .no_main_window(args.background);
+        .exit_on_close(false);
 
     let flags = Flags {
         backend,
@@ -168,20 +164,8 @@ mod tests {
     #[test]
     fn parses_flags() {
         assert_eq!(args(&[]), Ok(Args::default()));
-        assert_eq!(
-            args(&["--fake"]),
-            Ok(Args {
-                fake: true,
-                background: false
-            })
-        );
-        assert_eq!(
-            args(&["--background", "--fake"]),
-            Ok(Args {
-                fake: true,
-                background: true
-            })
-        );
+        assert_eq!(args(&["--fake"]), Ok(Args { fake: true }));
+        assert!(args(&["--background"]).is_err());
         assert!(args(&["--bogus"]).is_err());
     }
 }

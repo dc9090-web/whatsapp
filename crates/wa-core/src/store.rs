@@ -426,7 +426,7 @@ impl Store {
         Ok(())
     }
 
-    /// Sum of `unread` over non-muted chats (tray badge).
+    /// Sum of `unread` over non-muted chats.
     pub fn total_unread(&self) -> anyhow::Result<u32> {
         let total: i64 = self.conn.query_row(
             "SELECT COALESCE(SUM(unread), 0) FROM chats WHERE muted = 0",

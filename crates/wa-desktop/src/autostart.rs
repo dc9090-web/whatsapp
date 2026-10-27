@@ -10,8 +10,8 @@ const FILE_NAME: &str = "com.github.whatsapp-cosmic.desktop";
 const DESKTOP_ENTRY: &str = "[Desktop Entry]
 Type=Application
 Name=WhatsApp
-Comment=Start WhatsApp in the background
-Exec=whatsapp-cosmic --background
+Comment=Open WhatsApp at login
+Exec=whatsapp-cosmic
 Icon=com.github.whatsapp-cosmic
 Terminal=false
 X-GNOME-Autostart-enabled=true
@@ -27,7 +27,7 @@ pub fn is_enabled() -> bool {
 }
 
 /// Writes/removes `~/.config/autostart/com.github.whatsapp-cosmic.desktop`
-/// with `Exec=whatsapp-cosmic --background`.
+/// with `Exec=whatsapp-cosmic`.
 pub fn set_enabled(enabled: bool) -> anyhow::Result<()> {
     let dir = autostart_dir()
         .ok_or_else(|| anyhow::anyhow!("could not determine the XDG config directory"))?;
@@ -72,7 +72,7 @@ mod tests {
         set_enabled_in(&dir, true).unwrap();
         let text = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
         assert!(text.starts_with("[Desktop Entry]"));
-        assert!(text.contains("Exec=whatsapp-cosmic --background"));
+        assert!(text.contains("Exec=whatsapp-cosmic\n"));
         assert!(text.contains("Type=Application"));
         assert!(text.contains("X-GNOME-Autostart-enabled=true"));
         assert!(is_enabled_in(&dir));

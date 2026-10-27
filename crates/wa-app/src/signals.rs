@@ -1,4 +1,4 @@
-//! SIGTERM/SIGINT → the same graceful quit as the tray's "Quit", so logout
+//! SIGTERM/SIGINT → the same graceful quit as closing the window, so logout
 //! and `kill` let the backend disconnect and flush its session state.
 
 use cosmic::iced::Subscription;
