@@ -33,4 +33,6 @@
   <releases>
     <release version="0.1.0" date="2026-10-27"/>
   </releases>
+  <url type="homepage">https://github.com/dc9090-web/whatsapp</url>
+  <url type="bugtracker">https://github.com/dc9090-web/whatsapp/issues</url>
 </component>

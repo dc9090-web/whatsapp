@@ -12,8 +12,9 @@ makedepends=(rust cargo git just cmake)
 provides=("$_pkgname")
 conflicts=("$_pkgname")
 options=('!lto')
-# Builds from the repository this PKGBUILD lives in (packaging/..).
-source=("$_pkgname::git+file://$(realpath "$startdir/..")")
+# Builds the latest commit from GitHub.
+url="https://github.com/dc9090-web/whatsapp"
+source=("$_pkgname::git+https://github.com/dc9090-web/whatsapp.git")
 sha256sums=('SKIP')
 
 pkgver() {
