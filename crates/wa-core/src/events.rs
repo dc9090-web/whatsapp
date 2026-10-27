@@ -29,6 +29,7 @@ pub enum ConnectionState {
 
 /// Backend → runtime → UI.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // `Message` dominates; boxing would change the contract.
 pub enum BackendEvent {
     /// A pairing QR payload to render; replaced by the next `Qr` when it expires.
     Qr { code: String, valid_for_secs: u64 },
