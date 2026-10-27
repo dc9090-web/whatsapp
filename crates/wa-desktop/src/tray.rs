@@ -102,10 +102,12 @@ impl ksni::Tray for WaTray {
     }
 
     fn icon_name(&self) -> String {
-        self.icon_name.clone()
+        icon_name_for(self.unread, &self.icon_name)
     }
 
-    // Hosts prefer `icon_name`; the pixmap is the fallback representation.
+    // Hosts (cosmic-applet-status-area among them) draw `icon_name` when it
+    // is set and ignore overlays/attention icons, so while there is unread
+    // mail the name is cleared and the badge pixmap *is* the icon.
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         self.badge_icons()
     }
@@ -151,6 +153,16 @@ impl ksni::Tray for WaTray {
             }
             .into(),
         ]
+    }
+}
+
+/// The themed icon name to advertise: none while unread messages exist, so
+/// hosts fall back to the badge pixmap.
+pub(crate) fn icon_name_for(unread: u32, app_icon: &str) -> String {
+    if unread > 0 {
+        String::new()
+    } else {
+        app_icon.to_owned()
     }
 }
 
@@ -340,6 +352,12 @@ mod tests {
     fn different_counts_render_differently() {
         assert_ne!(badge_pixmap(1), badge_pixmap(2));
         assert_ne!(badge_pixmap(9), badge_pixmap(10));
+    }
+
+    #[test]
+    fn unread_replaces_the_themed_icon_with_the_badge() {
+        assert_eq!(icon_name_for(0, APP_ID), APP_ID);
+        assert_eq!(icon_name_for(3, APP_ID), "");
     }
 
     #[test]
