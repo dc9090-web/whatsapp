@@ -11,6 +11,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::convert::KeyRecord;
+use crate::dbkey::DbKey;
 use crate::model::ChatId;
 
 const SCHEMA: &str = "
@@ -43,8 +44,9 @@ pub struct Index {
 }
 
 impl Index {
-    pub fn open(path: &Path) -> anyhow::Result<Self> {
-        let conn = Connection::open(path)?;
+    /// Opens the index at `path`, encrypted with `key` (see [`crate::dbkey`]).
+    pub fn open(path: &Path, key: &DbKey) -> anyhow::Result<Self> {
+        let conn = crate::dbkey::open(path, key)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Self::init(conn)
@@ -203,6 +205,7 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dbkey::DbKey;
 
     fn rec(id: &str, ts: i64, quote: Option<Vec<u8>>) -> KeyRecord {
         KeyRecord {
@@ -277,14 +280,31 @@ mod tests {
     fn lid_map_persists() {
         let dir = tempfile::tempdir().expect("tmp");
         let path = dir.path().join("idx.db");
-        Index::open(&path)
+        let key = DbKey::random();
+        Index::open(&path, &key)
             .expect("open")
             .put_lid("100", "1555")
             .expect("put");
-        let idx = Index::open(&path).expect("reopen");
+        let idx = Index::open(&path, &key).expect("reopen");
         assert_eq!(
             idx.lid_map().expect("map"),
             vec![("100".to_owned(), "1555".to_owned())]
+        );
+    }
+
+    #[test]
+    fn index_file_is_encrypted_at_rest() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("idx.db");
+        let key = DbKey::random();
+        Index::open(&path, &key)
+            .expect("open")
+            .put_lid("100", "1555")
+            .expect("put");
+        assert!(!crate::dbkey::is_plaintext(&path).expect("header"));
+        assert!(
+            Index::open(&path, &DbKey::random()).is_err(),
+            "wrong key opened it"
         );
     }
 }

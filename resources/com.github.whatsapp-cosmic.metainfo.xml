@@ -10,7 +10,12 @@
       A native Rust client built with libcosmic. It links to your phone as a
       WhatsApp linked device by scanning a QR code, and supports chats and
       groups, replies, reactions, images, stickers, voice notes, documents,
-      desktop notifications.
+      voice calls, status updates, search and desktop notifications.
+    </p>
+    <p>
+      Your message history and session keys are stored in SQLCipher-encrypted
+      databases. The encryption key lives in your desktop keyring, so a copied
+      database file cannot be read without it.
     </p>
     <p>
       This is an unofficial client and is not affiliated with or endorsed by

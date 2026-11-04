@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use rusqlite::{OptionalExtension as _, Row, params};
 
+use crate::dbkey::DbKey;
 use crate::model::{
     Chat, ChatId, ChatKind, Message, MessageContent, MessageId, MessageStatus, QuotedMessage,
     Reaction,
@@ -29,15 +30,10 @@ pub struct Store {
 }
 
 impl Store {
-    /// Opens (creating and migrating if needed) the database at `path`, in WAL mode.
-    pub fn open(path: &Path) -> anyhow::Result<Self> {
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-        let conn = rusqlite::Connection::open(path)
-            .with_context(|| format!("opening {}", path.display()))?;
-        Self::init(conn)
+    /// Opens (creating and migrating if needed) the database at `path`, in WAL
+    /// mode, encrypted with `key` (see [`crate::dbkey`]).
+    pub fn open(path: &Path, key: &DbKey) -> anyhow::Result<Self> {
+        Self::init(crate::dbkey::open(path, key)?)
     }
 
     pub fn open_in_memory() -> anyhow::Result<Self> {
@@ -736,6 +732,7 @@ fn load_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dbkey::DbKey;
     use crate::model::{ChatKind, MediaRef, MessageContent};
 
     fn direct() -> ChatId {
@@ -1220,20 +1217,63 @@ mod tests {
     fn open_file_db_persists() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("app.db");
+        let key = DbKey::random();
         {
-            let s = Store::open(&path).unwrap();
+            let s = Store::open(&path, &key).unwrap();
             s.upsert_message(&msg(&direct(), "A", 1, false, "persist me"))
                 .unwrap();
         }
-        let s = Store::open(&path).unwrap();
+        let s = Store::open(&path, &key).unwrap();
         let got = s
             .message(&direct(), &MessageId("A".into()))
             .unwrap()
             .unwrap();
         assert_eq!(got.content, MessageContent::Text("persist me".into()));
         // A second concurrent handle works too (WAL).
-        let s2 = Store::open(&path).unwrap();
+        let s2 = Store::open(&path, &key).unwrap();
         assert_eq!(s2.chats().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn open_file_db_is_encrypted_at_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let key = DbKey::random();
+        {
+            let s = Store::open(&path, &key).unwrap();
+            s.upsert_message(&msg(&direct(), "A", 1, false, "secret text"))
+                .unwrap();
+        }
+        assert!(!crate::dbkey::is_plaintext(&path).unwrap());
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(
+            !bytes.windows(11).any(|w| w == b"secret text"),
+            "message text visible in the file"
+        );
+        assert!(
+            Store::open(&path, &DbKey::random()).is_err(),
+            "wrong key opened it"
+        );
+    }
+
+    #[test]
+    fn plaintext_db_from_an_older_version_is_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO chats (id, kind, name) VALUES ('x@s.whatsapp.net', 'direct', 'Old')",
+                [],
+            )
+            .unwrap();
+        }
+        let key = DbKey::random();
+        let s = Store::open(&path, &key).unwrap();
+        assert_eq!(s.chats().unwrap()[0].name, "Old");
+        assert!(!crate::dbkey::is_plaintext(&path).unwrap());
     }
 
     #[test]

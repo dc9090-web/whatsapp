@@ -86,8 +86,10 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&dir)?;
     println!("state directory: {}", dir.display());
 
-    let backend = WhatsAppRustBackend::new(dir.join("session.db"), dir.join("media"));
-    let store = Store::open(&dir.join("app.db"))?;
+    // A throwaway key: this is a debugging aid, not a place to keep history.
+    let key = wa_core::DbKey::random();
+    let backend = WhatsAppRustBackend::new(dir.join("session.db"), dir.join("media"), key.clone());
+    let store = Store::open(&dir.join("app.db"), &key)?;
     let mut handle = wa_core::start(Box::new(backend), store);
 
     // stdin is read on a plain thread so no extra tokio features are needed.

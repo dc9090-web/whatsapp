@@ -18,6 +18,8 @@ mod index;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+use anyhow::Context as _;
 use std::time::Duration;
 
 use tokio::sync::{Semaphore, mpsc};
@@ -25,6 +27,7 @@ use whatsapp_rust::bot::{Bot, BotHandle};
 use whatsapp_rust::download::Downloadable;
 use whatsapp_rust::http::HttpRequest;
 use whatsapp_rust::prelude::{MessageBuilderExt, SqliteStore};
+use whatsapp_rust::store::SqliteStoreConfig;
 use whatsapp_rust::types::events::{Event, EventHandler};
 use whatsapp_rust::wacore::store::DevicePropsOverride;
 use whatsapp_rust::waproto::codec;
@@ -37,6 +40,7 @@ use self::convert::{Converted, KeyRecord, LidMap, MediaPayload};
 mod calls;
 use self::index::Index;
 use crate::backend::WhatsAppBackend;
+use crate::dbkey::DbKey;
 use crate::events::{BackendCommand, BackendEvent, ConnectionState};
 use crate::model::{Chat, ChatId, MediaRef, MessageId, Reaction};
 use whatsapp_rust::wacore::types::presence::ReceiptType;
@@ -45,13 +49,16 @@ use whatsapp_rust::wacore_binary::JidExt as _;
 pub struct WhatsAppRustBackend {
     session_db: PathBuf,
     media_dir: PathBuf,
+    /// Encrypts the session database and its sidecar index at rest.
+    key: DbKey,
 }
 
 impl WhatsAppRustBackend {
-    pub fn new(session_db: PathBuf, media_dir: PathBuf) -> Self {
+    pub fn new(session_db: PathBuf, media_dir: PathBuf, key: DbKey) -> Self {
         Self {
             session_db,
             media_dir,
+            key,
         }
     }
 }
@@ -92,6 +99,7 @@ struct Shared {
     events: mpsc::Sender<BackendEvent>,
     index: Mutex<Index>,
     index_path: PathBuf,
+    key: DbKey,
     lids: Mutex<LidMap>,
     media_dir: PathBuf,
     /// Dedupes `LoggedOut` (whatsapp-rust dispatches one on `logout()` too).
@@ -197,11 +205,11 @@ fn index_path_for(session_db: &Path) -> PathBuf {
 
 /// Opens the sidecar index, falling back to an in-memory one (with a warning
 /// for the user) if the file cannot be opened.
-fn open_index(path: &Path) -> anyhow::Result<(Index, Option<String>)> {
+fn open_index(path: &Path, key: &DbKey) -> anyhow::Result<(Index, Option<String>)> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    match Index::open(path) {
+    match Index::open(path, key) {
         Ok(idx) => Ok((idx, None)),
         Err(e) => {
             let msg = format!(
@@ -212,6 +220,32 @@ fn open_index(path: &Path) -> anyhow::Result<(Index, Option<String>)> {
             Ok((Index::open_in_memory()?, Some(msg)))
         }
     }
+}
+
+/// Opens the protocol library's session database, encrypted with `key`. Every
+/// pooled connection is keyed before the library touches it; a plaintext file
+/// from an earlier version is encrypted in place first.
+async fn open_session_store(session_db: &Path, key: &DbKey) -> anyhow::Result<SqliteStore> {
+    if let Some(parent) = session_db.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    // Encrypts a plaintext file and checks the key fits, failing fast with a
+    // clear error instead of letting the pool retry until its timeout.
+    drop(crate::dbkey::open(session_db, key)?);
+    let url = session_db
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("session path is not valid UTF-8"))?;
+    let pragma = key.key_pragma();
+    let config = SqliteStoreConfig::default().with_connection_init(move |conn| {
+        use diesel::RunQueryDsl as _;
+        diesel::sql_query(&pragma).execute(conn)?;
+        // Fails on a wrongly keyed file instead of letting migrations run.
+        diesel::sql_query("SELECT count(*) FROM sqlite_master").execute(conn)?;
+        Ok(())
+    });
+    SqliteStore::with_config(url, config)
+        .await
+        .with_context(|| format!("opening {}", session_db.display()))
 }
 
 /// Removes a SQLite database and its WAL side files.
@@ -235,7 +269,7 @@ impl WhatsAppBackend for WhatsAppRustBackend {
         events: mpsc::Sender<BackendEvent>,
     ) -> anyhow::Result<()> {
         let index_path = index_path_for(&self.session_db);
-        let (idx, warning) = open_index(&index_path)?;
+        let (idx, warning) = open_index(&index_path, &self.key)?;
         if let Err(e) = idx.prune(index::MAX_KEYS) {
             tracing::warn!("index prune failed: {e:#}");
         }
@@ -244,6 +278,7 @@ impl WhatsAppBackend for WhatsAppRustBackend {
             events,
             index: Mutex::new(idx),
             index_path,
+            key: self.key.clone(),
             lids: Mutex::new(lids),
             media_dir: self.media_dir.clone(),
             logged_out_sent: AtomicBool::new(false),
@@ -362,7 +397,7 @@ const NOT_UNLINKED: &str = "Logged out locally, but WhatsApp could not be reache
 fn wipe_session(session_db: &Path, shared: &Shared) {
     remove_db_files(session_db);
     remove_db_files(&shared.index_path);
-    match open_index(&shared.index_path) {
+    match open_index(&shared.index_path, &shared.key) {
         Ok((idx, _)) => *lock(&shared.index) = idx,
         Err(e) => tracing::error!("could not recreate the backend index: {e:#}"),
     }
@@ -499,13 +534,7 @@ async fn run_session(
     shared: &Arc<Shared>,
     commands: &mut mpsc::Receiver<BackendCommand>,
 ) -> anyhow::Result<SessionEnd> {
-    if let Some(parent) = session_db.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let url = session_db
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("session path is not valid UTF-8"))?;
-    let store = SqliteStore::new(url).await?;
+    let store = open_session_store(session_db, &shared.key).await?;
 
     let (bus_tx, bus_rx) = mpsc::unbounded_channel();
     let bot = Bot::builder()
@@ -1971,6 +2000,21 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn session_store_is_encrypted_at_rest() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("session.db");
+        let key = DbKey::random();
+        let store = open_session_store(&path, &key).await.expect("open");
+        drop(store);
+        assert!(!crate::dbkey::is_plaintext(&path).expect("header"));
+        assert!(
+            open_session_store(&path, &DbKey::random()).await.is_err(),
+            "wrong key opened the session store"
+        );
+        open_session_store(&path, &key).await.expect("reopen");
+    }
+
     #[test]
     fn remove_db_files_removes_side_files() {
         let dir = tempfile::tempdir().expect("tmp");
@@ -2004,6 +2048,7 @@ mod tests {
             events: ev_tx,
             index: Mutex::new(Index::open_in_memory().expect("index")),
             index_path: PathBuf::from("/nonexistent/index"),
+            key: DbKey::random(),
             lids: Mutex::new(LidMap::new()),
             media_dir: PathBuf::from("/nonexistent"),
             logged_out_sent: AtomicBool::new(false),
@@ -2047,6 +2092,7 @@ mod tests {
             events: ev_tx,
             index: Mutex::new(Index::open_in_memory().expect("index")),
             index_path: PathBuf::from("/nonexistent/index"),
+            key: DbKey::random(),
             lids: Mutex::new(LidMap::new()),
             media_dir: PathBuf::from("/nonexistent"),
             logged_out_sent: AtomicBool::new(false),
@@ -2067,6 +2113,7 @@ mod tests {
             events: ev_tx,
             index: Mutex::new(Index::open_in_memory().expect("index")),
             index_path: PathBuf::from("/nonexistent/index"),
+            key: DbKey::random(),
             lids: Mutex::new(LidMap::new()),
             media_dir: PathBuf::from("/nonexistent"),
             logged_out_sent: AtomicBool::new(false),

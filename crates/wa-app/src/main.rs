@@ -20,6 +20,7 @@ use cosmic::iced::Size;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use wa_core::DbKey;
 
 use crate::app::{App, Flags};
 use crate::backend_sub::BackendConfig;
@@ -93,6 +94,7 @@ fn backend_config(fake: bool) -> anyhow::Result<(BackendConfig, Option<tempfile:
             app_db: base.join("app.db"),
             session_db: base.join("session.db"),
             media_dir: media,
+            key: DbKey::random(),
         };
         return Ok((config, Some(dir)));
     }
@@ -101,8 +103,19 @@ fn backend_config(fake: bool) -> anyhow::Result<(BackendConfig, Option<tempfile:
         app_db: wa_core::paths::app_db()?,
         session_db: wa_core::paths::session_db()?,
         media_dir: wa_core::paths::media_dir()?,
+        key: database_key()?,
     };
     Ok((config, None))
+}
+
+/// The database key from the desktop keyring. Runs before the UI (and its
+/// executor) exists, so it drives the async keyring client on a small
+/// runtime of its own.
+fn database_key() -> anyhow::Result<DbKey> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(wa_core::dbkey::load_or_create())
 }
 
 fn main() -> std::process::ExitCode {
@@ -118,8 +131,10 @@ fn main() -> std::process::ExitCode {
     let (backend, temp_dir) = match backend_config(args.fake) {
         Ok(config) => config,
         Err(err) => {
-            tracing::error!(?err, "cannot prepare data directories");
-            eprintln!("whatsapp-cosmic: cannot prepare data directories: {err:#}");
+            tracing::error!(?err, "cannot prepare data directories or the database key");
+            eprintln!(
+                "whatsapp-cosmic: cannot prepare the data directories or the database key: {err:#}"
+            );
             return std::process::ExitCode::FAILURE;
         }
     };

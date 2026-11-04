@@ -43,7 +43,7 @@ single binary that follows your COSMIC theme and accent colour.
 
 ### 🖥️ Desktop integration
 - 🔔 **Notifications** through COSMIC's notification daemon, with the sender's picture; one per chat that updates in place; click to open the chat; previews optional
-- 🔊 **New-message chime** — the WhatsApp sound, with a Settings toggle
+- 🔊 **New-message chime** — a short sound on every notification, with a Settings toggle
 - 🧩 **App icon** for the COSMIC app library and dock
 - 🚀 **Start at login** (optional)
 - 🛑 **Graceful shutdown** on window close, SIGTERM (logout) and SIGINT
@@ -55,14 +55,16 @@ single binary that follows your COSMIC theme and accent colour.
 - 🎯 **Accent-tinted** outgoing bubbles that follow your COSMIC accent colour
 
 ### 🔒 Data
+- 🔐 **Encrypted at rest** — the message history, the session with its Signal keys and the backend's index are SQLCipher databases (AES-256). The key is a random 256-bit value kept in your desktop keyring (Secret Service, e.g. gnome-keyring), fetched silently at launch; a copied database file is useless without it, and plain `sqlite3` refuses to open one. Databases from earlier versions are encrypted in place on first start
 - 🗄️ All history in a local SQLite database; media cached on disk; data directories are owner-only
 - 🚪 **Log out** unlinks the device and wipes everything local
 
 ## Build and run
 
 Requires stable Rust (1.94 or newer), `cmake` (for the bundled Opus build), the
-Wayland development libraries (`libxkbcommon`, `wayland`), ALSA, and a colour
-emoji font (`noto-fonts-emoji` on Arch).
+Wayland development libraries (`libxkbcommon`, `wayland`), ALSA, OpenSSL (for
+the bundled SQLCipher build), a running Secret Service keyring (gnome-keyring
+or KWallet) and a colour emoji font (`noto-fonts-emoji` on Arch).
 
 ```sh
 cargo run --release -p wa-app            # real backend: scan the QR with your phone
@@ -95,12 +97,18 @@ Builds and installs `whatsapp-cosmic-git` from this repository.
 
 | What | Where |
 |---|---|
-| Session keys and message database | `~/.local/share/whatsapp-cosmic/` |
-| Downloaded media and profile pictures | `~/.cache/whatsapp-cosmic/media/` |
+| Session keys and message database (SQLCipher-encrypted) | `~/.local/share/whatsapp-cosmic/` |
+| Database key | your desktop keyring, attributes `app=whatsapp-cosmic purpose=database-key` |
+| Downloaded media and profile pictures (not encrypted) | `~/.cache/whatsapp-cosmic/media/` |
 | Logs (daily files) | `~/.local/state/whatsapp-cosmic/log/` |
 | Settings | COSMIC config (`cosmic-config`) |
 
 Set `RUST_LOG=debug` for a more talkative log.
+
+To inspect a database by hand you need a SQLCipher-capable client and the key
+from the keyring (`secret-tool lookup app whatsapp-cosmic purpose database-key | xxd -p`),
+applied as `PRAGMA key = "x'<hex>'"`. Deleting the keyring entry makes the
+databases unreadable for good: you would have to log out and pair again.
 
 ## How it works
 
@@ -115,7 +123,7 @@ Set `RUST_LOG=debug` for a more talkative log.
 │   └────────┬─────────┘                    └────┬─────┘                  └──────────┘│
 │            │ reads                             │ writes                             │
 │            ▼                                   ▼                                    │
-│          app.db (SQLite: chats, messages, reactions)                                 │
+│          app.db (SQLCipher-encrypted SQLite: chats, messages, reactions)             │
 └────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -146,6 +154,8 @@ crates/
 │   ├── src/backend/fake.rs       scripted demo backend + bundled sample media
 │   ├── src/runtime.rs            persist-then-forward pump, optimistic sends, logout wipe
 │   ├── src/store.rs (+ store/schema.sql)   SQLite store: upserts, paging, receipts, reactions
+│   ├── src/dbkey.rs              SQLCipher key from the desktop keyring, keyed opens,
+│   │                             in-place encryption of older plaintext databases
 │   ├── src/paths.rs              XDG directories (created owner-only)
 │   └── examples/wa_cli.rs        headless pairing/debugging tool
 ├── wa-desktop/                   desktop integration, no UI toolkit
@@ -183,6 +193,7 @@ docs/superpowers/                 the design spec and implementation plan this w
 
 - [ ] **Pair:** start the app, scan the QR code from WhatsApp → Linked devices; history sync completes and the chat list appears
 - [ ] **Restart:** quit and start again; no QR code, chats load from the local database
+- [ ] **Encrypted at rest:** `sqlite3 ~/.local/share/whatsapp-cosmic/app.db .tables` fails with "file is not a database"; `secret-tool lookup app whatsapp-cosmic purpose database-key` returns the key
 - [ ] **Receive:** a message from another phone appears in the list and the open conversation; a notification shows when the window is not focused and clicking it opens the chat
 - [ ] **Send:** send a text; the status icon goes sending → sent → delivered → read; reply to a message and check the quote on the phone
 - [ ] **React:** react from the app and from the phone; both show, and your own reaction is highlighted

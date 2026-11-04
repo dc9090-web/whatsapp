@@ -315,7 +315,7 @@ fn now_ms() -> i64 {
 
 impl App {
     fn new(core: Core, flags: Flags) -> Self {
-        let store = match Store::open(&flags.backend.app_db) {
+        let store = match Store::open(&flags.backend.app_db, &flags.backend.key) {
             Ok(store) => Some(store),
             Err(err) => {
                 tracing::error!(?err, "UI cannot open app database");
@@ -2523,6 +2523,7 @@ mod tests {
                 app_db: PathBuf::from("/nonexistent/app.db"),
                 session_db: PathBuf::from("/nonexistent/session.db"),
                 media_dir: PathBuf::from("/nonexistent/media"),
+                key: wa_core::DbKey::random(),
             },
             Config::default(),
             None,

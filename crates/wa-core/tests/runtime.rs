@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use wa_core::backend::fake::FakeBackend;
 use wa_core::{
-    BackendCommand, BackendEvent, Chat, ChatId, ChatKind, Handle, Message, MessageContent,
+    BackendCommand, BackendEvent, Chat, ChatId, ChatKind, DbKey, Handle, Message, MessageContent,
     MessageId, MessageStatus, Reaction, Store, start,
 };
 
@@ -38,10 +38,15 @@ struct Setup {
     received: mpsc::UnboundedReceiver<BackendCommand>,
 }
 
+/// One fixed key for the whole file so a database can be reopened by path.
+fn test_key() -> DbKey {
+    DbKey::from_bytes(&[7u8; 32]).unwrap()
+}
+
 fn setup(script: Vec<BackendEvent>) -> Setup {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("app.db");
-    let store = Store::open(&db).unwrap();
+    let store = Store::open(&db, &test_key()).unwrap();
     let (tx, received) = mpsc::unbounded_channel();
     let backend = FakeBackend {
         script,
@@ -65,7 +70,7 @@ async fn next(handle: &mut Handle) -> BackendEvent {
 }
 
 fn reopen(db: &Path) -> Store {
-    Store::open(db).unwrap()
+    Store::open(db, &test_key()).unwrap()
 }
 
 #[tokio::test]
@@ -458,7 +463,7 @@ async fn pending_messages_from_last_run_become_failed() {
     let db = dir.path().join("app.db");
     let local_id = MessageId::new_local();
     {
-        let store = Store::open(&db).unwrap();
+        let store = Store::open(&db, &test_key()).unwrap();
         let mut m = incoming(&local_id.0, 1, "in flight");
         m.from_me = true;
         m.status = MessageStatus::Pending;
@@ -469,7 +474,7 @@ async fn pending_messages_from_last_run_become_failed() {
         received: None,
         auto_reply: false,
     };
-    let _handle = start(Box::new(backend), Store::open(&db).unwrap());
+    let _handle = start(Box::new(backend), Store::open(&db, &test_key()).unwrap());
     let status = reopen(&db)
         .message(&alice(), &local_id)
         .unwrap()

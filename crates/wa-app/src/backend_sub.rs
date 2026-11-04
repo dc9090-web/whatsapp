@@ -12,7 +12,7 @@ use cosmic::iced::futures::SinkExt;
 use tokio::sync::mpsc;
 use wa_core::backend::fake::FakeBackend;
 use wa_core::backend::whatsapp_rust::WhatsAppRustBackend;
-use wa_core::{BackendCommand, BackendEvent, Store, WhatsAppBackend};
+use wa_core::{BackendCommand, BackendEvent, DbKey, Store, WhatsAppBackend};
 
 /// Which backend to run and where its data lives. Hashable so it identifies
 /// the subscription: the runtime starts exactly once per configuration.
@@ -22,6 +22,8 @@ pub struct BackendConfig {
     pub app_db: PathBuf,
     pub session_db: PathBuf,
     pub media_dir: PathBuf,
+    /// Encrypts every database at rest; from the keyring, or random for `--fake`.
+    pub key: DbKey,
 }
 
 /// Command channel to the runtime, wrapped for `Debug`/`Clone` messages.
@@ -68,9 +70,10 @@ pub fn subscription(config: BackendConfig) -> Subscription<BackendMsg> {
                 Box::new(WhatsAppRustBackend::new(
                     config.session_db.clone(),
                     config.media_dir.clone(),
+                    config.key.clone(),
                 ))
             };
-            let store = match Store::open(&config.app_db) {
+            let store = match Store::open(&config.app_db, &config.key) {
                 Ok(store) => store,
                 Err(err) => {
                     tracing::error!(?err, "runtime cannot open app database");
