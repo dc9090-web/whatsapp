@@ -39,7 +39,7 @@ enum Command {
     Chime,
 }
 
-/// The new-message sound, Ogg/Opus, ~1.7 s.
+/// The new-message sound, Ogg/Opus, ~0.5 s.
 const CHIME: &[u8] = include_bytes!("../assets/message.ogg");
 
 /// Cheap, cloneable handle to the playback thread.
@@ -312,7 +312,7 @@ mod tests {
         let (channels, samples) = decode_ogg_opus(std::io::Cursor::new(CHIME)).unwrap();
         assert_eq!(channels, 2);
         let seconds = samples.len() as f32 / (2.0 * OPUS_RATE as f32);
-        assert!((1.5..2.0).contains(&seconds), "{seconds}s");
+        assert!((0.3..1.0).contains(&seconds), "{seconds}s");
         assert!(samples.iter().any(|s| s.abs() > 0.05), "silent chime");
     }
 
