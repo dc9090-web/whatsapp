@@ -232,8 +232,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .collect();
         let mut column = widget::column::with_capacity(visible.len() + 1)
             .spacing(size::ROW_GAP)
-            // Extra room on the right keeps rows clear of the scrollbar.
-            .padding([12, 12, 12, 8]);
+            // Extra room on the right keeps rows clear of the scrollbar. The
+            // gap above the first row is mostly the fixed padding under the
+            // filter chips, so rows scrolling up never touch them.
+            .padding([4, 12, 12, 8]);
         if app.filter == Filter::All {
             column = column.push(status_row(app));
         }
@@ -263,7 +265,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .push(
                 widget::column::with_capacity(2)
                     .spacing(12)
-                    .padding([0, 12])
+                    .padding([0, 12, 10, 12])
                     .push(search)
                     .push_maybe((!searching).then_some(chips)),
             )

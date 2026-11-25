@@ -237,10 +237,12 @@ fn item<'a>(app: &'a App, m: &'a wa_core::Message) -> Element<'a, Message> {
                     error: app.media_errors.get(&m.id).map(String::as_str),
                     playing: app.playing.as_ref() == Some(&m.id) && !app.audio_paused,
                     outgoing: m.from_me,
+                    hovered: false,
                     saved: app.saved_media.get(&m.id).map(PathBuf::as_path),
                     gif_frame: None,
                     gif_loading: false,
                 },
+                None,
             )
             .unwrap_or_else(|| widget::text::body(content.preview()).into())
         }

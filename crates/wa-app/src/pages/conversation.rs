@@ -36,6 +36,10 @@ pub fn gif_search_id() -> widget::Id {
     widget::Id::new("gif-search")
 }
 
+pub fn emoji_search_id() -> widget::Id {
+    widget::Id::new("emoji-search")
+}
+
 pub fn composer_id() -> widget::Id {
     widget::Id::new("conversation-composer")
 }
@@ -692,7 +696,7 @@ fn composer(app: &App) -> Element<'_, Message> {
     );
     let emoji: Element<'_, Message> = if app.emoji_panel_open {
         widget::popover(emoji_button)
-            .popup(emoji_panel())
+            .popup(emoji_panel(app))
             .position(widget::popover::Position::Top)
             .on_close(Message::CloseEmojiPanel)
             .into()
@@ -826,16 +830,26 @@ fn composer(app: &App) -> Element<'_, Message> {
 const EMOJI_PANEL_WIDTH: f32 = 400.0;
 
 /// The emoji panel above the composer: pick as many as you like.
-fn emoji_panel<'a>() -> Element<'a, Message> {
+fn emoji_panel(app: &App) -> Element<'_, Message> {
     let space = theme::spacing();
-    let grid = widgets::emoji::grid(8, Message::InsertEmoji);
+    let grid = widgets::emoji::picker(&app.emoji_query, 8, Message::InsertEmoji);
     let panel = container(
-        widget::scrollable(
-            container(grid)
-                .width(Length::Fill)
-                .align_x(Alignment::Center),
-        )
-        .height(Length::Fixed(340.0)),
+        widget::column::with_capacity(2)
+            .spacing(space.space_xs)
+            .push(
+                widget::search_input("Search emoji", app.emoji_query.as_str())
+                    .id(emoji_search_id())
+                    .on_input(Message::EmojiQueryChanged)
+                    .on_clear(Message::EmojiQueryChanged(String::new())),
+            )
+            .push(
+                widget::scrollable(
+                    container(grid)
+                        .width(Length::Fill)
+                        .align_x(Alignment::Center),
+                )
+                .height(Length::Fixed(340.0)),
+            ),
     )
     .width(Length::Fixed(EMOJI_PANEL_WIDTH))
     .padding(space.space_xs)

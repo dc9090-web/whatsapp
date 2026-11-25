@@ -796,6 +796,7 @@ fn demo_script(now: i64) -> Vec<BackendEvent> {
             caption: None,
             media: media("video/mp4", SAMPLE_MP4, "sample.mp4", Some(SAMPLE_JPEG)),
             gif: true,
+            duration_secs: 2,
         },
     );
     mum.add(
@@ -915,6 +916,7 @@ fn demo_script(now: i64) -> Vec<BackendEvent> {
                 download_token: format!("{TOKEN_PREFIX}video.mp4").into_bytes(),
             },
             gif: false,
+            duration_secs: 2,
         },
     );
     family.text(

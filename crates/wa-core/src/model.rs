@@ -177,6 +177,9 @@ pub enum MessageContent {
         /// A short silent clip that loops like a GIF.
         #[serde(default)]
         gif: bool,
+        /// Length in seconds; 0 when the sender did not say.
+        #[serde(default)]
+        duration_secs: u32,
     },
     Document {
         file_name: String,

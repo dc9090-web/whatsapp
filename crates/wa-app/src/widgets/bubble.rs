@@ -87,6 +87,15 @@ pub fn view<'a>(msg: &'a wa_core::Message, ctx: BubbleCtx<'a>) -> Element<'a, Me
     let outgoing = msg.from_me;
     let is_sticker = matches!(msg.content, MessageContent::Sticker { .. });
 
+    // Photos, GIFs and videos fill their bubble edge to edge; whatever else
+    // the bubble holds is set in to line up with ordinary text.
+    let picture = media::is_picture(&msg.content);
+    let inset = if picture {
+        size::BUBBLE_PAD_X - media::PICTURE_PAD
+    } else {
+        0.0
+    };
+
     let mut body = widget::column::with_capacity(5).spacing(space.space_xxs);
 
     if ctx.show_sender
@@ -94,29 +103,15 @@ pub fn view<'a>(msg: &'a wa_core::Message, ctx: BubbleCtx<'a>) -> Element<'a, Me
         && let Some(name) = ctx.sender_label.clone()
     {
         body = body.push(
-            widget::text::caption_heading(name).class(theme::Text::Custom(super::accent_text)),
+            container(
+                widget::text::caption_heading(name).class(theme::Text::Custom(super::accent_text)),
+            )
+            .padding([inset / 2.0, inset, 0.0, inset]),
         );
     }
 
     if let Some(quote) = &msg.reply_to {
         body = body.push(quote_block(quote, ctx.quote_sender.clone(), outgoing));
-    }
-
-    if let Some(media) = media::view(
-        &msg.content,
-        MediaState {
-            id: &msg.id,
-            thumb: ctx.thumb,
-            fetching: ctx.fetching,
-            error: ctx.media_error,
-            playing: ctx.playing,
-            outgoing,
-            saved: ctx.saved,
-            gif_frame: ctx.gif_frame,
-            gif_loading: ctx.gif_loading,
-        },
-    ) {
-        body = body.push(media);
     }
 
     // The caption or text; its last line shares the row with the footer.
@@ -133,6 +128,34 @@ pub fn view<'a>(msg: &'a wa_core::Message, ctx: BubbleCtx<'a>) -> Element<'a, Me
         } if !c.is_empty() => Some(c.as_str()),
         _ => None,
     };
+    // A picture with no caption carries its time and ticks on the picture.
+    let footer_on_picture = picture && text.is_none();
+    let mut footer = Some(footer(msg, &ctx.time, outgoing, footer_on_picture));
+    let picture_width = media::picture_size(ctx.thumb, ctx.gif_frame).0;
+
+    if let Some(media) = media::view(
+        &msg.content,
+        MediaState {
+            id: &msg.id,
+            thumb: ctx.thumb,
+            fetching: ctx.fetching,
+            error: ctx.media_error,
+            playing: ctx.playing,
+            outgoing,
+            hovered: ctx.hovered,
+            saved: ctx.saved,
+            gif_frame: ctx.gif_frame,
+            gif_loading: ctx.gif_loading,
+        },
+        if footer_on_picture {
+            footer.take()
+        } else {
+            None
+        },
+    ) {
+        body = body.push(media);
+    }
+
     if matches!(msg.content, MessageContent::Unsupported { .. }) {
         body = body.push(
             body_text("Unsupported message — open WhatsApp on your phone")
@@ -144,39 +167,53 @@ pub fn view<'a>(msg: &'a wa_core::Message, ctx: BubbleCtx<'a>) -> Element<'a, Me
         );
     }
 
-    let footer = footer(msg, &ctx.time, outgoing);
-    let body: Element<'a, Message> = match text {
-        Some(text) => {
-            body = body.push(
+    let body: Element<'a, Message> = match (text, footer) {
+        (Some(text), Some(footer)) => {
+            let caption = cosmic::iced::widget::stack![
                 widget::text(with_footer_room(text, outgoing))
+                    // Under a picture the caption spans its width, so the
+                    // time sits at the bubble's right edge.
+                    .width(if picture {
+                        Length::Fixed(picture_width - 2.0 * inset)
+                    } else {
+                        Length::Shrink
+                    })
                     .size(size::TEXT_BODY)
                     .line_height(cosmic::iced::widget::text::LineHeight::Relative(
                         BODY_LINE_HEIGHT,
                     ))
                     .wrapping(Wrapping::WordOrGlyph),
-            );
-            cosmic::iced::widget::stack![
-                body,
                 container(footer)
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .align_x(Alignment::End)
                     .align_y(Alignment::End)
                     .padding([0, 0, 3, 0]),
-            ]
-            .into()
+            ];
+            // Under a picture the caption gets the text inset the bubble
+            // itself no longer has.
+            body.push(container(caption).padding([0.0, inset, inset / 2.0, inset]))
+                .into()
         }
         // Nothing to trail: the footer hugs the bottom-right corner.
-        None => widget::column::with_capacity(2)
+        (None, Some(footer)) => widget::column::with_capacity(2)
             .spacing(space.space_xxxs)
             .align_x(Alignment::End)
             .push(body)
             .push(footer)
             .into(),
+        (_, None) => body.into(),
     };
 
     let bubble: Element<'a, Message> = if is_sticker {
         container(body).padding([space.space_xxs, 0]).into()
+    } else if picture {
+        // The bubble hugs the picture; a caption wraps at its width.
+        container(body)
+            .padding(media::PICTURE_PAD)
+            .max_width(picture_width + 2.0 * media::PICTURE_PAD)
+            .class(bubble_class(outgoing, ctx.highlighted))
+            .into()
     } else {
         container(body)
             .padding([size::BUBBLE_PAD_Y, size::BUBBLE_PAD_X])
@@ -302,15 +339,24 @@ pub fn view<'a>(msg: &'a wa_core::Message, ctx: BubbleCtx<'a>) -> Element<'a, Me
     column.into()
 }
 
-fn footer<'a>(msg: &'a wa_core::Message, time: &str, outgoing: bool) -> Element<'a, Message> {
+/// The time and delivery ticks. `on_picture` draws them in white, for
+/// laying over a photo.
+fn footer<'a>(
+    msg: &'a wa_core::Message,
+    time: &str,
+    outgoing: bool,
+    on_picture: bool,
+) -> Element<'a, Message> {
     let time = widget::text(time.to_owned())
         .size(size::TEXT_BUBBLE_TIME)
         .wrapping(Wrapping::None)
-        .class(theme::Text::Custom(if outgoing {
-            style::text_on_tint
+        .class(if on_picture {
+            theme::Text::Color(Color::WHITE)
+        } else if outgoing {
+            theme::Text::Custom(style::text_on_tint)
         } else {
-            style::text_secondary
-        }));
+            theme::Text::Custom(style::text_secondary)
+        });
     let mut row = widget::row::with_capacity(3)
         .spacing(6)
         .align_y(Alignment::Center)
@@ -322,6 +368,7 @@ fn footer<'a>(msg: &'a wa_core::Message, time: &str, outgoing: bool) -> Element<
             MessageStatus::Failed => {
                 super::icon_tint(|t| t.cosmic().destructive_text_color().into())
             }
+            _ if on_picture => super::icon_tint(|_| Color::WHITE),
             _ => style::icon_color(|p| p.text_on_tint),
         };
         row = row.push(with_tooltip(

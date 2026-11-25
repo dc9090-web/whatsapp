@@ -47,12 +47,29 @@ pub struct Flags {
 pub enum Dialog {
     EmojiPicker(MessageId),
     ImageViewer { path: PathBuf },
+    VideoViewer(VideoView),
     ConfirmLogout,
     ConfirmDeleteForEveryone(MessageId),
     ConfirmDeleteChat(ChatId),
     ConfirmLeaveGroup(ChatId),
     NewGroup,
     NewChat,
+}
+
+/// The video open in the viewer. Dropping it stops playback.
+#[derive(Debug, Clone)]
+pub struct VideoView {
+    pub id: MessageId,
+    pub path: PathBuf,
+    /// `None` while the file is being opened.
+    pub player: Option<std::sync::Arc<crate::videoplay::Player>>,
+    /// The picture on screen.
+    pub frame: Option<widget::image::Handle>,
+    pub position_ms: u64,
+    pub playing: bool,
+    /// A seek was asked for and its picture has not arrived yet.
+    pub seeking: bool,
+    pub error: Option<String>,
 }
 
 /// A GIF playing in place.
@@ -199,6 +216,8 @@ pub enum Message {
     /// Shows or hides the composer's emoji panel.
     ToggleEmojiPanel,
     CloseEmojiPanel,
+    /// The text typed into an emoji picker's search field.
+    EmojiQueryChanged(String),
     /// Appends an emoji to the message being typed; the panel stays open.
     InsertEmoji(&'static str),
     /// Shows or hides the composer's GIF search panel.
@@ -261,6 +280,19 @@ pub enum Message {
     ResetSoundFile,
     CopyText(String),
     Hover(Option<MessageId>),
+    /// The video for the viewer was opened (or could not be).
+    VideoOpened(
+        MessageId,
+        Result<std::sync::Arc<crate::videoplay::Player>, String>,
+    ),
+    /// Time to show the viewer's next picture.
+    VideoTick,
+    /// Play or pause the video in the viewer.
+    VideoToggle,
+    /// Jump to this many milliseconds into the video.
+    VideoSeek(u32),
+    /// The window changed size.
+    WindowResized(cosmic::iced::Size),
     /// The pointer left this message's bubble/actions area.
     HoverEnd(MessageId),
     Retry(MessageId),
@@ -363,6 +395,10 @@ pub struct App {
     pub chat_menu_for: Option<ChatId>,
     /// The composer's emoji panel is showing.
     pub emoji_panel_open: bool,
+    /// Size of the main window, for fitting the video viewer into it.
+    pub window_size: cosmic::iced::Size,
+    /// What is typed into the open emoji picker's search field.
+    pub emoji_query: String,
     /// The composer's GIF search panel.
     pub gifs: GifPanel,
     /// Search within the open conversation, when its bar is showing.
@@ -521,6 +557,8 @@ impl App {
             menu_for: None,
             chat_menu_for: None,
             emoji_panel_open: false,
+            window_size: cosmic::iced::Size::new(1100.0, 760.0),
+            emoji_query: String::new(),
             gifs: GifPanel::default(),
             chat_search: None,
             show_contact_info: false,
@@ -824,9 +862,7 @@ impl App {
             let media = match &msg.content {
                 MessageContent::Image { media, .. }
                 | MessageContent::Sticker { media }
-                | MessageContent::Video {
-                    media, gif: true, ..
-                } => media,
+                | MessageContent::Video { media, .. } => media,
                 _ => continue,
             };
             let has_local = media::local_file(media).is_some();
@@ -1110,6 +1146,32 @@ impl App {
             MessageContent::Image { .. } | MessageContent::Sticker { .. } => {
                 self.dialog = Some(Dialog::ImageViewer { path });
                 Task::none()
+            }
+            MessageContent::Video { .. } => {
+                let id = id.clone();
+                // A voice note would talk over the video.
+                if self.playing.take().is_some()
+                    && let Some(audio) = &self.audio
+                {
+                    audio.stop();
+                }
+                self.dialog = Some(Dialog::VideoViewer(VideoView {
+                    id: id.clone(),
+                    path: path.clone(),
+                    player: None,
+                    frame: None,
+                    position_ms: 0,
+                    playing: false,
+                    seeking: false,
+                    error: None,
+                }));
+                cosmic::task::future(async move {
+                    let opened =
+                        tokio::task::spawn_blocking(move || crate::videoplay::Player::open(&path))
+                            .await
+                            .unwrap_or_else(|e| Err(format!("could not open the video: {e}")));
+                    Message::VideoOpened(id, opened.map(std::sync::Arc::new))
+                })
             }
             _ => open_path(path),
         }
@@ -1672,12 +1734,18 @@ impl Application for App {
         let space = theme::spacing();
         match self.dialog.as_ref()? {
             Dialog::EmojiPicker(target) => {
-                let grid = crate::widgets::emoji::grid(9, |emoji| {
+                let grid = crate::widgets::emoji::picker(&self.emoji_query, 9, |emoji| {
                     Message::React(target.clone(), emoji.to_owned())
                 });
                 Some(
                     widget::dialog()
                         .title("Choose a reaction")
+                        .control(
+                            widget::search_input("Search emoji", self.emoji_query.as_str())
+                                .id(conversation::emoji_search_id())
+                                .on_input(Message::EmojiQueryChanged)
+                                .on_clear(Message::EmojiQueryChanged(String::new())),
+                        )
                         .control(
                             container(
                                 widget::scrollable(
@@ -1707,6 +1775,7 @@ impl Application for App {
                     .secondary_action(button::standard("Open in viewer").on_press(Message::OpenFile(path.clone())))
                     .into(),
             ),
+            Dialog::VideoViewer(view) => Some(pages::video::viewer(self, view)),
             Dialog::ConfirmDeleteForEveryone(_) => Some(
                 widget::dialog()
                     .title("Delete for everyone?")
@@ -1810,6 +1879,11 @@ impl Application for App {
             } else {
                 Subscription::none()
             },
+            if matches!(&self.dialog, Some(Dialog::VideoViewer(view)) if view.player.is_some()) {
+                cosmic::iced::time::every(Duration::from_millis(15)).map(|_| Message::VideoTick)
+            } else {
+                Subscription::none()
+            },
             if self.recording.is_some() {
                 cosmic::iced::time::every(Duration::from_millis(500)).map(|_| Message::RecordTick)
             } else {
@@ -1817,9 +1891,20 @@ impl Application for App {
             },
             window::close_requests().map(Message::CloseRequested),
             signals::subscription().map(|()| Message::Quit),
-            cosmic::iced::event::listen_with(|event, _status, id| match event {
+            cosmic::iced::event::listen_with(|event, status, id| match event {
+                // Space plays or pauses the video in the viewer (unless it
+                // was typed into a text field).
+                cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
+                    key: cosmic::iced::keyboard::Key::Character(c),
+                    ..
+                }) if c.as_str() == " " && status == cosmic::iced::event::Status::Ignored => {
+                    Some(Message::VideoToggle)
+                }
                 cosmic::iced::Event::Window(window::Event::Focused) => {
                     Some(Message::WindowFocused(id))
+                }
+                cosmic::iced::Event::Window(window::Event::Resized(size)) => {
+                    Some(Message::WindowResized(size))
                 }
                 cosmic::iced::Event::Window(window::Event::Unfocused) => {
                     Some(Message::WindowUnfocused(id))
@@ -1952,6 +2037,15 @@ impl Application for App {
             Message::ToggleEmojiPanel => {
                 self.emoji_panel_open = !self.emoji_panel_open;
                 self.gifs.open = false;
+                self.emoji_query.clear();
+                if self.emoji_panel_open {
+                    widget::text_input::focus(conversation::emoji_search_id())
+                } else {
+                    widget::text_input::focus(conversation::composer_id())
+                }
+            }
+            Message::EmojiQueryChanged(query) => {
+                self.emoji_query = query;
                 Task::none()
             }
             Message::ToggleGifPanel => {
@@ -2600,12 +2694,78 @@ impl Application for App {
             }
             Message::OpenEmojiPicker(id) => {
                 self.menu_for = None;
+                self.emoji_query.clear();
                 self.dialog = Some(Dialog::EmojiPicker(id));
-                Task::none()
+                widget::text_input::focus(conversation::emoji_search_id())
             }
             Message::CopyText(text) => {
                 self.menu_for = None;
                 cosmic::iced::clipboard::write(text)
+            }
+            Message::VideoOpened(id, opened) => {
+                if let Some(Dialog::VideoViewer(view)) = &mut self.dialog
+                    && view.id == id
+                {
+                    match opened {
+                        Ok(player) => {
+                            player.play();
+                            view.playing = true;
+                            view.player = Some(player);
+                        }
+                        Err(error) => view.error = Some(error),
+                    }
+                }
+                Task::none()
+            }
+            Message::VideoTick => {
+                if let Some(Dialog::VideoViewer(view)) = &mut self.dialog
+                    && let Some(player) = &view.player
+                {
+                    if let Some(frame) = player.take_frame() {
+                        view.position_ms = frame.position_ms;
+                        view.seeking = false;
+                        view.frame = Some(widget::image::Handle::from_rgba(
+                            frame.width,
+                            frame.height,
+                            frame.rgba,
+                        ));
+                    }
+                    if player.ended() && !view.seeking {
+                        view.position_ms = player.info.duration_ms;
+                    }
+                    view.playing = player.playing();
+                    if view.error.is_none() {
+                        view.error = player.error();
+                    }
+                }
+                Task::none()
+            }
+            Message::WindowResized(size) => {
+                self.window_size = size;
+                Task::none()
+            }
+            Message::VideoToggle => {
+                if let Some(Dialog::VideoViewer(view)) = &mut self.dialog
+                    && let Some(player) = &view.player
+                {
+                    if player.playing() {
+                        player.pause();
+                    } else {
+                        player.play();
+                    }
+                    view.playing = !player.playing();
+                }
+                Task::none()
+            }
+            Message::VideoSeek(ms) => {
+                if let Some(Dialog::VideoViewer(view)) = &mut self.dialog
+                    && let Some(player) = &view.player
+                {
+                    view.position_ms = u64::from(ms);
+                    view.seeking = true;
+                    player.seek(u64::from(ms));
+                }
+                Task::none()
             }
             Message::Hover(id) => {
                 // Keep the hover target while its menu is open.

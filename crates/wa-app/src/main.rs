@@ -17,6 +17,7 @@ mod recorder;
 mod signals;
 mod style;
 mod tokens;
+mod videoplay;
 mod widgets;
 
 use std::path::PathBuf;

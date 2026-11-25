@@ -129,6 +129,8 @@ pub struct MediaState<'a> {
     pub error: Option<&'a str>,
     pub playing: bool,
     pub outgoing: bool,
+    /// The pointer is over this message.
+    pub hovered: bool,
     /// Where the file was saved to, if the user saved it.
     pub saved: Option<&'a Path>,
     /// The frame to show while this message's GIF is playing.
@@ -145,13 +147,39 @@ pub struct GifFrame {
     pub height: u32,
 }
 
+/// Whether `content` is shown as a picture that fills its bubble (photos,
+/// GIFs and videos), as opposed to a row or a sticker.
+pub fn is_picture(content: &MessageContent) -> bool {
+    matches!(
+        content,
+        MessageContent::Image { .. } | MessageContent::Video { .. }
+    )
+}
+
+/// Gap between a picture and the edge of its bubble.
+pub const PICTURE_PAD: f32 = 4.0;
+/// Corner radius of a picture: the bubble's, less [`PICTURE_PAD`].
+const PICTURE_RADIUS: f32 = 12.0;
+
+/// The size a picture message is drawn at.
+pub fn picture_size(thumb: Option<&Thumb>, gif_frame: Option<&GifFrame>) -> (f32, f32) {
+    match (thumb, gif_frame) {
+        (Some(thumb), _) => fit_size(thumb.width, thumb.height, MAX_INLINE),
+        (None, Some(frame)) => fit_size(frame.width, frame.height, MAX_INLINE),
+        (None, None) => (MAX_INLINE, (MAX_INLINE * 0.62).round()),
+    }
+}
+
+/// `footer` (the time and ticks) is laid over the bottom of a picture; pass
+/// it for picture messages without a caption.
 pub fn view<'a>(
     content: &'a MessageContent,
     state: MediaState<'a>,
+    footer: Option<Element<'a, Message>>,
 ) -> Option<Element<'a, Message>> {
     let element = match content {
-        MessageContent::Image { media, .. } => visual(media, &state, false),
-        MessageContent::Sticker { media } => visual(media, &state, true),
+        MessageContent::Image { media, .. } => visual(media, &state, footer),
+        MessageContent::Sticker { media } => sticker(media, &state),
         MessageContent::Audio {
             voice_note,
             duration_secs,
@@ -159,10 +187,12 @@ pub fn view<'a>(
         } => audio(*voice_note, *duration_secs, media, &state),
         MessageContent::Video {
             media, gif: true, ..
-        } => gif(media, &state),
-        MessageContent::Video { media, .. } => {
-            file_row("video-x-generic-symbolic", "Video", media, &state)
-        }
+        } => gif(media, &state, footer),
+        MessageContent::Video {
+            media,
+            duration_secs,
+            ..
+        } => video(media, *duration_secs, &state, footer),
         MessageContent::Document {
             file_name, media, ..
         } => file_row("x-office-document-symbolic", file_name, media, &state),
@@ -171,164 +201,308 @@ pub fn view<'a>(
     Some(element)
 }
 
-fn visual<'a>(media: &'a MediaRef, state: &MediaState<'a>, sticker: bool) -> Element<'a, Message> {
-    let space = theme::spacing();
-    let max = if sticker { STICKER_SIZE } else { MAX_INLINE };
-    // The save row below takes the picture's width: a `Fill` inside the
-    // shrink-wrapped bubble would collapse the whole bubble to zero width.
-    let shown_width = match state.thumb {
-        Some(thumb) => fit_size(thumb.width, thumb.height, max).0,
-        None => max,
+/// A translucent dark backing that keeps white text readable on a picture.
+fn on_picture<'a>(
+    content: impl Into<Element<'a, Message>>,
+    radius: f32,
+) -> widget::Container<'a, Message, cosmic::Theme> {
+    container(content).class(theme::Container::custom(move |_| container::Style {
+        background: Some(Background::Color(with_alpha(Color::BLACK, 0.55))),
+        text_color: Some(Color::WHITE),
+        border: Border {
+            radius: radius.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }))
+}
+
+/// A short white label on a dark pill ("GIF", "0:12").
+fn tag<'a>(text: String) -> Element<'a, Message> {
+    on_picture(
+        widget::text(text)
+            .size(11)
+            .font(cosmic::font::bold())
+            .wrapping(cosmic::iced::widget::text::Wrapping::None)
+            .class(theme::Text::Color(Color::WHITE)),
+        6.0,
+    )
+    .padding([2, 7])
+    .into()
+}
+
+/// What is laid over a picture.
+#[derive(Default)]
+struct Overlay<'a> {
+    /// Top-left corner: what kind of picture this is.
+    tag: Option<Element<'a, Message>>,
+    /// The middle: a play button, or progress.
+    centre: Option<Element<'a, Message>>,
+    /// Bottom-left corner: the time and ticks.
+    footer: Option<Element<'a, Message>>,
+}
+
+/// A picture that fills its bubble and reacts to a click, with `overlay`
+/// on top and — while the pointer is over the message — a button to save
+/// it in the bottom-right corner.
+fn framed<'a>(
+    handle: Option<&widget::image::Handle>,
+    state: &MediaState<'a>,
+    on_press: Message,
+    overlay: Overlay<'a>,
+) -> Element<'a, Message> {
+    let (w, h) = picture_size(state.thumb, state.gif_frame);
+    let body: Element<'a, Message> = match handle {
+        Some(handle) => widget::image(handle.clone())
+            .width(Length::Fixed(w))
+            .height(Length::Fixed(h))
+            .content_fit(ContentFit::Cover)
+            .border_radius([PICTURE_RADIUS; 4])
+            .into(),
+        None => container(icon::from_name("image-x-generic-symbolic").size(48))
+            .width(Length::Fixed(w))
+            .height(Length::Fixed(h))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .class(crate::style::surface(|p| p.selected, PICTURE_RADIUS))
+            .into(),
     };
+    let corner = |element: Element<'a, Message>, x: Alignment, y: Alignment| {
+        container(element)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(x)
+            .align_y(y)
+            .padding(6)
+    };
+    let mut layers = Vec::with_capacity(4);
+    layers.push(body);
+    if let Some(tag) = overlay.tag {
+        layers.push(corner(tag, Alignment::Start, Alignment::Start).into());
+    }
+    if let Some(centre) = overlay.centre {
+        layers.push(corner(centre, Alignment::Center, Alignment::Center).into());
+    }
+    let save = state.hovered.then(|| save_overlay(state));
+    if overlay.footer.is_some() || save.is_some() {
+        let footer = overlay
+            .footer
+            .map(|footer| on_picture(footer, 9.0).padding([2, 7]));
+        layers.push(
+            corner(
+                widget::row::with_capacity(3)
+                    .align_y(Alignment::End)
+                    .push_maybe(footer)
+                    .push(widget::Space::new().width(Length::Fill))
+                    .push_maybe(save)
+                    .into(),
+                Alignment::Start,
+                Alignment::End,
+            )
+            .into(),
+        );
+    }
+    button::custom(
+        cosmic::iced::widget::Stack::with_children(layers)
+            .width(Length::Fixed(w))
+            .height(Length::Fixed(h)),
+    )
+    .padding(0)
+    .class(theme::Button::Image)
+    .on_press(on_press)
+    .into()
+}
+
+/// The picture, with "Downloading…" or the error and a retry under it.
+fn with_status<'a>(
+    picture: Element<'a, Message>,
+    state: &MediaState<'a>,
+    media: &MediaRef,
+    show_fetching: bool,
+) -> Element<'a, Message> {
+    let status = status_line(state, media).filter(|_| show_fetching || state.error.is_some());
+    match status {
+        Some(status) => widget::column::with_capacity(2)
+            .spacing(theme::spacing().space_xxxs)
+            .push(picture)
+            .push(container(status).padding([2, 8]))
+            .into(),
+        None => picture,
+    }
+}
+
+fn visual<'a>(
+    media: &'a MediaRef,
+    state: &MediaState<'a>,
+    footer: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let picture = framed(
+        state.thumb.map(|thumb| &thumb.handle),
+        state,
+        Message::OpenMedia(state.id.clone()),
+        Overlay {
+            footer,
+            ..Overlay::default()
+        },
+    );
+    with_status(picture, state, media, true)
+}
+
+fn sticker<'a>(media: &'a MediaRef, state: &MediaState<'a>) -> Element<'a, Message> {
     let body: Element<'a, Message> = match state.thumb {
         Some(thumb) => {
-            let (w, h) = fit_size(thumb.width, thumb.height, max);
+            let (w, h) = fit_size(thumb.width, thumb.height, STICKER_SIZE);
             widget::image(thumb.handle.clone())
                 .width(Length::Fixed(w))
                 .height(Length::Fixed(h))
                 .content_fit(ContentFit::Cover)
-                .border_radius(if sticker { [0.0; 4] } else { [10.0; 4] })
                 .into()
         }
         None => container(icon::from_name("image-x-generic-symbolic").size(48))
-            .width(Length::Fixed(max))
-            .height(Length::Fixed(max * 0.66))
-            .align_x(Alignment::Center)
-            .align_y(Alignment::Center)
-            .class(theme::Container::custom(|theme| container::Style {
-                background: Some(Background::Color(with_alpha(
-                    theme.cosmic().on_bg_color().into(),
-                    0.08,
-                ))),
-                border: Border {
-                    radius: 10.0.into(),
-                    ..Border::default()
-                },
-                ..container::Style::default()
-            }))
-            .into(),
-    };
-
-    let image_button = button::custom(body)
-        .padding(0)
-        .class(theme::Button::Image)
-        .on_press(Message::OpenMedia(state.id.clone()));
-
-    let mut column = widget::column::with_capacity(3)
-        .spacing(space.space_xxxs)
-        .push(image_button);
-    if let Some(status) = status_line(state, media) {
-        column = column.push(status);
-    }
-    if !sticker {
-        column = column.push(save_row(state, shown_width));
-    }
-    column.into()
-}
-
-/// A GIF: a picture that plays in place when clicked, and stops on the next
-/// click.
-fn gif<'a>(media: &'a MediaRef, state: &MediaState<'a>) -> Element<'a, Message> {
-    let space = theme::spacing();
-    let picture = |handle: &widget::image::Handle, width: u32, height: u32| {
-        let (w, h) = fit_size(width, height, MAX_INLINE);
-        let image: Element<'a, Message> = widget::image(handle.clone())
-            .width(Length::Fixed(w))
-            .height(Length::Fixed(h))
-            .content_fit(ContentFit::Cover)
-            .border_radius([10.0; 4])
-            .into();
-        image
-    };
-    let playing = state.gif_frame.is_some();
-    let body: Element<'a, Message> = match (state.gif_frame, state.thumb) {
-        (Some(frame), _) => picture(&frame.handle, frame.width, frame.height),
-        (None, Some(thumb)) => picture(&thumb.handle, thumb.width, thumb.height),
-        (None, None) => container(icon::from_name("image-x-generic-symbolic").size(48))
-            .width(Length::Fixed(MAX_INLINE))
-            .height(Length::Fixed(MAX_INLINE * 0.56))
+            .width(Length::Fixed(STICKER_SIZE))
+            .height(Length::Fixed(STICKER_SIZE * 0.66))
             .align_x(Alignment::Center)
             .align_y(Alignment::Center)
             .class(crate::style::surface(|p| p.selected, 10.0))
             .into(),
     };
-    // A small "GIF" tag in the corner says it will move when clicked.
-    let body: Element<'a, Message> = if playing {
-        body
-    } else {
-        let tag = container(
-            widget::text(if state.gif_loading { "…" } else { "GIF" })
-                .size(11)
-                .font(cosmic::font::bold())
-                .class(theme::Text::Color(Color::WHITE)),
-        )
-        .padding([2, 7])
-        .class(theme::Container::custom(|_| container::Style {
-            background: Some(Background::Color(with_alpha(Color::BLACK, 0.6))),
-            border: Border {
-                radius: 6.0.into(),
-                ..Border::default()
-            },
-            ..container::Style::default()
-        }));
-        cosmic::iced::widget::stack![
-            body,
-            container(tag)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(Alignment::Start)
-                .align_y(Alignment::End)
-                .padding(8),
-        ]
-        .into()
-    };
-    let mut column = widget::column::with_capacity(2)
-        .spacing(space.space_xxxs)
-        .push(
-            button::custom(body)
-                .padding(0)
-                .class(theme::Button::Image)
-                .on_press(Message::ToggleGif(state.id.clone())),
-        );
-    if let Some(status) = status_line(state, media) {
-        column = column.push(status);
-    }
-    column.into()
+    let picture = button::custom(body)
+        .padding(0)
+        .class(theme::Button::Image)
+        .on_press(Message::OpenMedia(state.id.clone()))
+        .into();
+    with_status(picture, state, media, true)
 }
 
-/// "Save to Downloads" control, or where the file went once saved.
-fn save_row<'a>(state: &MediaState<'a>, width: f32) -> Element<'a, Message> {
-    let space = theme::spacing();
-    let mut row = widget::row::with_capacity(2)
-        .spacing(space.space_xxs)
-        .align_y(Alignment::Center)
-        .width(Length::Fixed(width));
-    match state.saved {
-        Some(path) => {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            row = row
-                .push(
-                    widget::text::caption("Saved to Downloads")
-                        .class(theme::Text::Custom(super::dim_text))
-                        .wrapping(cosmic::iced::widget::text::Wrapping::None)
-                        .width(Length::Fill),
-                )
-                .push(widget::tooltip(
-                    button::text("Open").on_press(Message::OpenFile(path.to_path_buf())),
-                    widget::text::caption(name),
-                    widget::tooltip::Position::Top,
-                ));
-        }
-        None => {
-            row = row
-                .push(widget::Space::new().width(Length::Fill))
-                .push(save_button(state));
-        }
+/// A GIF: a picture that plays in place when clicked, and stops on the next
+/// click.
+fn gif<'a>(
+    media: &'a MediaRef,
+    state: &MediaState<'a>,
+    footer: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let handle = state
+        .gif_frame
+        .map(|frame| &frame.handle)
+        .or(state.thumb.map(|thumb| &thumb.handle));
+    // A small "GIF" tag in the corner says it will move when clicked.
+    let tag = state
+        .gif_frame
+        .is_none()
+        .then(|| tag(if state.gif_loading { "…" } else { "GIF" }.to_owned()));
+    let picture = framed(
+        handle,
+        state,
+        Message::ToggleGif(state.id.clone()),
+        Overlay {
+            tag,
+            footer,
+            ..Overlay::default()
+        },
+    );
+    with_status(picture, state, media, true)
+}
+
+/// A video: its first frame with a play button; a click opens the player.
+fn video<'a>(
+    media: &'a MediaRef,
+    duration_secs: u32,
+    state: &MediaState<'a>,
+    footer: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    // Length, and the download size while the file is still to be fetched.
+    let mut label = Vec::with_capacity(2);
+    if duration_secs > 0 {
+        label.push(format_duration(duration_secs));
     }
-    row.into()
+    if local_file(media).is_none() && media.size > 0 {
+        label.push(format_size(media.size));
+    }
+    let centre: Element<'a, Message> = if state.fetching {
+        tag("Downloading…".to_owned())
+    } else {
+        on_picture(
+            icon::icon(icon::from_name("media-playback-start-symbolic").handle())
+                .size(24)
+                .class(super::icon_tint(|_| Color::WHITE)),
+            PLAY_BUTTON / 2.0,
+        )
+        .width(Length::Fixed(PLAY_BUTTON))
+        .height(Length::Fixed(PLAY_BUTTON))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .into()
+    };
+    let picture = framed(
+        state.thumb.map(|thumb| &thumb.handle),
+        state,
+        Message::OpenMedia(state.id.clone()),
+        Overlay {
+            tag: (!label.is_empty()).then(|| tag(label.join(" · "))),
+            centre: Some(centre),
+            footer,
+        },
+    );
+    with_status(picture, state, media, false)
+}
+
+/// Diameter of the play button on a video.
+const PLAY_BUTTON: f32 = 52.0;
+/// Diameter of the save button shown over a hovered picture.
+const SAVE_BUTTON: f32 = 28.0;
+
+/// Round button over a picture: saves it to Downloads, or — once saved —
+/// opens the saved file.
+fn save_overlay<'a>(state: &MediaState<'a>) -> Element<'a, Message> {
+    let (handle, message, tip) = match state.saved {
+        Some(path) => (
+            icon::from_name("object-select-symbolic").handle(),
+            Message::OpenFile(path.to_path_buf()),
+            "Saved to Downloads — open it",
+        ),
+        None => (
+            super::download_icon(),
+            Message::SaveMedia(state.id.clone()),
+            "Save to Downloads",
+        ),
+    };
+    fn style(hovered: bool) -> button::Style {
+        let mut style = button::Style::new();
+        style.border_radius = (SAVE_BUTTON / 2.0).into();
+        style.background = Some(Background::Color(with_alpha(
+            Color::BLACK,
+            if hovered { 0.8 } else { 0.55 },
+        )));
+        style.icon_color = Some(Color::WHITE);
+        style.text_color = Some(Color::WHITE);
+        style
+    }
+    widget::tooltip(
+        button::custom(
+            container(
+                icon::icon(handle)
+                    .size(16)
+                    .class(super::icon_tint(|_| Color::WHITE)),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fixed(SAVE_BUTTON))
+        .height(Length::Fixed(SAVE_BUTTON))
+        .padding(0)
+        .class(theme::Button::Custom {
+            active: Box::new(|_, _| style(false)),
+            disabled: Box::new(|_| style(false)),
+            hovered: Box::new(|_, _| style(true)),
+            pressed: Box::new(|_, _| style(true)),
+        })
+        .on_press(message),
+        widget::text::caption(tip),
+        widget::tooltip::Position::Top,
+    )
+    .into()
 }
 
 fn save_button<'a>(state: &MediaState<'a>) -> Element<'a, Message> {

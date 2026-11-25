@@ -129,6 +129,82 @@ pub fn grid_width(per_row: usize) -> f32 {
     BUTTON_SIZE * per_row as f32
 }
 
+/// Most search results shown.
+pub const MAX_RESULTS: usize = 96;
+
+/// Emoji whose name or shortcode contains every word of `query` ("red
+/// heart", "thumbs", "joy"), best matches first. Searches every emoji, not
+/// only the ones in [`CATEGORIES`].
+pub fn search(query: &str) -> Vec<&'static str> {
+    let query = query.trim().trim_matches(':').to_lowercase();
+    let words: Vec<&str> = query.split_whitespace().collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let mut hits: Vec<(u8, &'static str)> = emojis::iter()
+        .filter_map(|emoji| {
+            let name = emoji.name();
+            let matches = |word: &str| {
+                name.contains(word) || emoji.shortcodes().any(|code| code.contains(word))
+            };
+            if !words.iter().all(|word| matches(word)) {
+                return None;
+            }
+            // A name or shortcode that *is* the query beats one that starts
+            // with it, which beats one that merely contains it.
+            let rank = if name == query || emoji.shortcodes().any(|code| code == query) {
+                0
+            } else if name
+                .split([' ', '-'])
+                .any(|part| part.starts_with(words[0]))
+                || emoji
+                    .shortcodes()
+                    .any(|code| code.split('_').any(|part| part.starts_with(words[0])))
+            {
+                1
+            } else {
+                2
+            };
+            Some((rank, emoji.as_str()))
+        })
+        .collect();
+    hits.sort_by_key(|(rank, _)| *rank);
+    hits.truncate(MAX_RESULTS);
+    hits.into_iter().map(|(_, emoji)| emoji).collect()
+}
+
+/// The picker's body: every category, or the emoji matching `query` when
+/// one is typed.
+pub fn picker<'a, M: Clone + 'a>(
+    query: &str,
+    per_row: usize,
+    on_pick: impl Fn(&'static str) -> M,
+) -> Element<'a, M> {
+    if query.trim().is_empty() {
+        return grid(per_row, on_pick);
+    }
+    let found = search(query);
+    if found.is_empty() {
+        return container(
+            widget::text::body("No emoji found").class(theme::Text::Custom(dim_text)),
+        )
+        .width(Length::Fixed(grid_width(per_row)))
+        .padding(theme::spacing().space_m)
+        .align_x(Alignment::Center)
+        .into();
+    }
+    let mut column = widget::column::with_capacity(found.len() / per_row + 1)
+        .width(Length::Fixed(grid_width(per_row)));
+    for chunk in found.chunks(per_row) {
+        let mut row = widget::row::with_capacity(per_row);
+        for emoji in chunk {
+            row = row.push(round_button(emoji, GLYPH_SIZE, BUTTON_SIZE, on_pick(emoji)));
+        }
+        column = column.push(row);
+    }
+    column.into()
+}
+
 /// Every category under its heading, `per_row` round buttons to a line.
 pub fn grid<'a, M: Clone + 'a>(
     per_row: usize,
@@ -168,6 +244,21 @@ mod tests {
         all.sort_unstable();
         all.dedup();
         assert_eq!(all.len(), total);
+    }
+
+    #[test]
+    fn search_matches_names_and_shortcodes() {
+        assert!(search("").is_empty());
+        assert!(search("   ").is_empty());
+        assert!(search("zzzzqq").is_empty());
+        assert!(search("heart").contains(&"❤️"));
+        assert!(search("red heart").contains(&"❤️"));
+        assert!(search("Thumbs").contains(&"👍"));
+        assert!(search("laugh").contains(&"😆"));
+        // Shortcodes work with or without their colons.
+        assert_eq!(search(":joy:").first(), Some(&"😂"));
+        assert_eq!(search("fire").first(), Some(&"🔥"));
+        assert!(search("a").len() <= MAX_RESULTS);
     }
 
     #[test]

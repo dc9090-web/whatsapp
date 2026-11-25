@@ -8,6 +8,7 @@ pub mod login;
 pub mod settings;
 pub mod status;
 pub mod sync;
+pub mod video;
 
 /// Which screen the main window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

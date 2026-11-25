@@ -379,6 +379,7 @@ pub fn content_of(m: &wa::Message) -> Option<(MessageContent, Option<QuotedMessa
             caption: non_empty(&v.caption),
             media,
             gif: v.gif_playback.unwrap_or(false),
+            duration_secs: v.seconds.unwrap_or(0),
         };
         return Some((content, quoted(&v.context_info)));
     }

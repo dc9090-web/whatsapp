@@ -311,6 +311,7 @@ fn apply_command(
                     caption: caption.clone(),
                     media,
                     gif: *gif,
+                    duration_secs: 0,
                 },
                 MediaKind::Audio => MessageContent::Audio {
                     voice_note: voice_secs.is_some(),
