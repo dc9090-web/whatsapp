@@ -25,9 +25,15 @@ libcosmic.workspace = true
 # Must match the version cosmic-text uses (its `Fallback` trait takes `Script`).
 unicode-script = "0.5.8"
 qrcode = { version = "0.14", default-features = false }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-rodio = { version = "0.23", default-features = false, features = ["playback"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+# GIPHY search (the same HTTP client whatsapp-rust already uses).
+ureq = "3"
+serde_json.workspace = true
+# Decoders are for custom notification sounds; voice notes use libopus.
+rodio = { version = "0.23", default-features = false, features = ["playback", "mp3", "wav", "vorbis", "flac"] }
 ogg = "0.9"
+# Microphone capture for voice messages (same version wa-core uses for calls).
+cpal = "0.18"
 opus = "0.4"
 open = "5"
 dirs = "6"

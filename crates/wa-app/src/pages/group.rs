@@ -262,6 +262,160 @@ fn invite(app: &App) -> Element<'_, Message> {
 
 /// The "New group" dialog: name, a member picker over direct chats, and a
 /// phone-number entry for people not in the chat list.
+/// Contact details for the open direct chat (shown in the context drawer).
+pub fn contact_view(app: &App) -> Element<'_, Message> {
+    let space = theme::spacing();
+    let Some(conv) = &app.conversation else {
+        return widget::Space::new().into();
+    };
+    let chat = &conv.chat;
+    let extra = app.chat_extras.get(&chat.id).copied().unwrap_or_default();
+    let busy = app.call.as_ref().is_some_and(crate::app::CallUi::is_live);
+
+    let top = widget::column::with_capacity(4)
+        .spacing(space.space_xxs)
+        .align_x(Alignment::Center)
+        .width(Length::Fill)
+        .push(widgets::avatar(
+            &chat.name,
+            &chat.id.0,
+            96.0,
+            app.avatars.get(&chat.id).map(PathBuf::as_path),
+        ))
+        .push(widget::Space::new().height(space.space_xxs))
+        .push(widget::text::title3(chat.name.as_str()))
+        .push(
+            widget::text::body(format!("+{}", chat.id.user()))
+                .class(theme::Text::Custom(widgets::dim_text)),
+        )
+        .push(
+            widget::text::caption(app.status_line(conv))
+                .class(theme::Text::Custom(widgets::dim_text)),
+        );
+
+    let actions = widget::row::with_capacity(2)
+        .spacing(space.space_xs)
+        .push(button::standard("Voice call").on_press_maybe((!busy).then_some(Message::StartCall)))
+        .push(button::standard("Search in chat").on_press(Message::ToggleChatSearch));
+
+    let options = widget::settings::section()
+        .add(
+            widget::settings::item::builder("Pinned")
+                .description("Keep this chat at the top of the list")
+                .toggler(extra.pinned, {
+                    let id = chat.id.clone();
+                    move |_| Message::TogglePinned(id.clone())
+                }),
+        )
+        .add(
+            widget::settings::item::builder("Favourite")
+                .description("Show this chat under the Favourites filter")
+                .toggler(extra.favourite, {
+                    let id = chat.id.clone();
+                    move |_| Message::ToggleFavourite(id.clone())
+                }),
+        )
+        .add(
+            widget::settings::item::builder("Notifications").control(widget::text::body(
+                if chat.muted {
+                    "Muted on your phone"
+                } else {
+                    "On"
+                },
+            )),
+        );
+
+    let danger = widget::settings::section().add(
+        widget::settings::item::builder("Delete chat")
+            .description("Remove this chat and its messages")
+            .control(
+                button::destructive("Delete").on_press(Message::AskDeleteChat(chat.id.clone())),
+            ),
+    );
+
+    widget::settings::view_column(vec![
+        top.into(),
+        container(actions)
+            .width(Length::Fill)
+            .align_x(Alignment::Center)
+            .into(),
+        options.into(),
+        danger.into(),
+    ])
+    .into()
+}
+
+pub fn new_chat_input_id() -> widget::Id {
+    widget::Id::new("new-chat-input")
+}
+
+/// "New chat": pick someone we already talk to, or type a phone number.
+pub fn new_chat_dialog(app: &App) -> Element<'_, Message> {
+    let space = theme::spacing();
+    let query = app.new_chat_query.trim();
+    let mut list = widget::column::with_capacity(32).spacing(space.space_xxxs);
+    if let Some(jid) = phone_to_jid(query)
+        && !app.chats.iter().any(|c| c.id.0 == jid)
+    {
+        let id = ChatId(jid);
+        list = list.push(
+            button::custom(
+                widget::row::with_capacity(2)
+                    .spacing(space.space_s)
+                    .align_y(Alignment::Center)
+                    .push(widgets::avatar("+", &id.0, 36.0, None))
+                    .push(widget::text::body(format!("Message +{}", id.user()))),
+            )
+            .width(Length::Fill)
+            .padding([space.space_xxs, space.space_xs])
+            .class(widgets::list_row_class(false))
+            .on_press(Message::StartChat(id)),
+        );
+    }
+    let people = app
+        .chats
+        .iter()
+        .filter(|c| c.kind == ChatKind::Direct)
+        .filter(|c| query.is_empty() || chat_matches(&c.name, query) || c.id.user().contains(query))
+        .take(50);
+    for chat in people {
+        list = list.push(
+            button::custom(
+                widget::row::with_capacity(2)
+                    .spacing(space.space_s)
+                    .align_y(Alignment::Center)
+                    .push(widgets::avatar(
+                        &chat.name,
+                        &chat.id.0,
+                        36.0,
+                        app.avatars.get(&chat.id).map(std::path::PathBuf::as_path),
+                    ))
+                    .push(widget::text::body(chat.name.as_str())),
+            )
+            .width(Length::Fill)
+            .padding([space.space_xxs, space.space_xs])
+            .class(widgets::list_row_class(false))
+            .on_press(Message::StartChat(chat.id.clone())),
+        );
+    }
+    widget::dialog()
+        .title("New chat")
+        .control(
+            widget::column::with_capacity(2)
+                .spacing(space.space_s)
+                .push(
+                    widget::search_input("Name or phone number with country code", query)
+                        .id(new_chat_input_id())
+                        .on_input(Message::NewChatQuery)
+                        .on_clear(Message::NewChatQuery(String::new())),
+                )
+                .push(widget::scrollable(list).height(Length::Fixed(300.0))),
+        )
+        .primary_action(button::standard("New group…").on_press(Message::NewGroup))
+        .secondary_action(button::standard("Cancel").on_press(Message::CloseDialog))
+        .into()
+}
+
 pub fn new_group_dialog(app: &App) -> Element<'_, Message> {
     let space = theme::spacing();
     let draft = &app.new_group;

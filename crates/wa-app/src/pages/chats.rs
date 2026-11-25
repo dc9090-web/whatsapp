@@ -1,16 +1,24 @@
 //! The chat list (left pane).
 
 use chrono::{DateTime, Datelike, Local, TimeZone};
+use cosmic::iced::core::text::{Ellipsize, EllipsizeHeightLimit};
 use cosmic::iced::widget::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget::{self, button, container, icon, mouse_area, popover};
 use cosmic::{Element, theme};
 use wa_core::{Chat, ChatId};
 
+use wa_core::store::ChatExtra;
+
 use crate::app::{App, Message};
+use crate::style;
+use crate::tokens::size;
 use crate::widgets::{self, list_row_class};
 
-pub const LIST_WIDTH: f32 = 340.0;
+pub const LIST_WIDTH: f32 = size::SIDEBAR_WIDTH;
+
+/// One line, ending in "…" when it does not fit.
+const ONE_LINE: Ellipsize = Ellipsize::End(EllipsizeHeightLimit::Lines(1));
 
 pub fn search_id() -> widget::Id {
     widget::Id::new("chat-search")
@@ -55,6 +63,22 @@ pub fn format_time(ts_ms: i64, now: DateTime<Local>) -> String {
     }
 }
 
+/// "last seen today at 2:52 PM" and friends; `None` for a bad timestamp.
+pub fn last_seen_label(ts_ms: i64, now: DateTime<Local>) -> Option<String> {
+    let time = local_time(ts_ms)?;
+    let days = now
+        .date_naive()
+        .signed_duration_since(time.date_naive())
+        .num_days();
+    let day = match days {
+        i64::MIN..=0 => "today".to_owned(),
+        1 => "yesterday".to_owned(),
+        2..=6 => weekday_name(time.weekday()).to_owned(),
+        _ => short_date(time),
+    };
+    Some(format!("last seen {day} at {}", clock(time)))
+}
+
 pub fn weekday_name(day: chrono::Weekday) -> &'static str {
     match day {
         chrono::Weekday::Mon => "Monday",
@@ -67,146 +91,342 @@ pub fn weekday_name(day: chrono::Weekday) -> &'static str {
     }
 }
 
+/// Which chats the list shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Filter {
+    #[default]
+    All,
+    Unread,
+    Groups,
+    Favourites,
+}
+
+impl Filter {
+    /// Whether `chat` belongs in the list under this filter.
+    pub fn shows(self, chat: &Chat, extra: Option<&ChatExtra>) -> bool {
+        match self {
+            Filter::All => true,
+            Filter::Unread => chat.unread > 0,
+            Filter::Groups => chat.kind == wa_core::ChatKind::Group,
+            Filter::Favourites => extra.is_some_and(|e| e.favourite),
+        }
+    }
+}
+
+/// Label of the Unread chip: "Unread · N" with N chats unread, plain at zero.
+pub fn unread_chip_label(unread_chats: usize) -> String {
+    if unread_chats > 0 {
+        format!("Unread \u{b7} {unread_chats}")
+    } else {
+        "Unread".to_owned()
+    }
+}
+
+fn sized<'a>(
+    content: impl Into<std::borrow::Cow<'a, str>> + 'a,
+    px: f32,
+) -> widget::Text<'a, cosmic::Theme, cosmic::Renderer> {
+    widget::text(content).size(px)
+}
+
 pub fn view(app: &App) -> Element<'_, Message> {
-    let space = theme::spacing();
     let now = Local::now();
 
-    let header = container(
-        widget::row::with_capacity(2)
+    let mut header = widget::row::with_capacity(4)
+        .align_y(Alignment::Center)
+        .spacing(4)
+        .push(
+            sized("Chats", size::TEXT_TITLE)
+                .font(cosmic::font::bold())
+                .class(theme::Text::Custom(style::text))
+                .width(Length::Fill),
+        )
+        .push(widgets::icon_button(
+            "list-add-symbolic",
+            size::ICON_BUTTON,
+            size::ICON,
+            "New chat",
+            Some(Message::NewChat),
+        ))
+        .push(app.main_menu());
+    // In the narrow single-pane layout this header is the only one showing.
+    if app.core.is_condensed() {
+        header = header.push(widgets::window_controls());
+    }
+    let header = widgets::drag_area(
+        container(header)
+            .height(Length::Fixed(widgets::HEADER_HEIGHT))
+            .padding([0, 8, 0, 20])
             .align_y(Alignment::Center)
-            .push(widget::text::title4("Chats").width(Length::Fill))
-            .push_maybe((app.total_unread > 0).then(|| {
-                widget::text::caption(format!("{} unread", app.total_unread))
-                    .class(theme::Text::Custom(widgets::dim_text))
-            })),
-    )
-    .height(Length::Fixed(widgets::HEADER_HEIGHT))
-    .padding([0, space.space_m])
-    .align_y(Alignment::Center)
-    .width(Length::Fill);
+            .width(Length::Fill),
+    );
 
     let search = container(
-        widget::search_input("Search chats and messages", app.search.as_str())
-            .id(search_id())
-            .on_input(Message::SearchChanged)
-            .on_clear(Message::ClearSearch),
+        widget::row::with_capacity(3)
+            .align_y(Alignment::Center)
+            .spacing(8)
+            .push(
+                icon::from_name("system-search-symbolic")
+                    .size(18)
+                    .icon()
+                    .class(style::icon_color(|p| p.text_secondary)),
+            )
+            .push(
+                widget::text_input("Search", app.search.as_str())
+                    .id(search_id())
+                    .on_input(Message::SearchChanged)
+                    .style(bare_input())
+                    .padding(0)
+                    .width(Length::Fill),
+            )
+            .push_maybe((!app.search.is_empty()).then(|| {
+                widgets::icon_button(
+                    "edit-clear-symbolic",
+                    28.0,
+                    16.0,
+                    "Clear search",
+                    Some(Message::ClearSearch),
+                )
+            }))
+            .push_maybe(app.search.is_empty().then(|| {
+                container(
+                    sized("Ctrl K", size::TEXT_META)
+                        .class(theme::Text::Custom(style::text_secondary)),
+                )
+                .padding([1, 6])
+                .class(style::outlined(|_| None, |p| p.key_border, 1.0, 4.0))
+            })),
     )
-    .padding([
-        space.space_xxs,
-        space.space_s,
-        space.space_xs,
-        space.space_s,
-    ])
-    .width(Length::Fill);
+    .height(Length::Fixed(size::SEARCH_HEIGHT))
+    .padding([0, 12, 0, 14])
+    .align_y(Alignment::Center)
+    .width(Length::Fill)
+    .class(style::surface(|p| p.component, size::SEARCH_HEIGHT / 2.0));
+
+    let unread_chats = app.chats.iter().filter(|c| c.unread > 0).count();
+    let chips = widget::row::with_capacity(4)
+        .spacing(size::CHIP_GAP)
+        .push(filter_chip("All".to_owned(), Filter::All, app.filter))
+        .push(filter_chip(
+            unread_chip_label(unread_chats),
+            Filter::Unread,
+            app.filter,
+        ))
+        .push(filter_chip("Groups".to_owned(), Filter::Groups, app.filter))
+        .push(filter_chip(
+            "Favourites".to_owned(),
+            Filter::Favourites,
+            app.filter,
+        ));
 
     let searching = !app.search.trim().is_empty();
     let list: Element<'_, Message> = if searching {
         search_results(app, now)
     } else if app.chats.is_empty() {
-        container(
-            widget::column::with_capacity(2)
-                .spacing(space.space_xs)
-                .align_x(Alignment::Center)
-                .push(widgets::app_logo(40))
-                .push(
-                    widget::text::body("No chats yet")
-                        .class(theme::Text::Custom(widgets::dim_text)),
-                ),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
-        .into()
+        empty_list("No chats yet", true)
     } else {
-        let mut column = widget::column::with_capacity(app.chats.len() + 1)
-            .spacing(space.space_xxxs)
-            .padding([space.space_xxs, space.space_xs]);
-        column = column.push(status_row(app));
-        for chat in &app.chats {
-            let selected = app.selected.as_ref() == Some(&chat.id);
-            let picture = app.avatars.get(&chat.id).map(std::path::PathBuf::as_path);
-            let menu_open = app.chat_menu_for.as_ref() == Some(&chat.id);
-            column = column.push(row(chat, selected, now, picture, menu_open));
+        let visible: Vec<&Chat> = app
+            .chats
+            .iter()
+            .filter(|c| app.filter.shows(c, app.chat_extras.get(&c.id)))
+            .collect();
+        let mut column = widget::column::with_capacity(visible.len() + 1)
+            .spacing(size::ROW_GAP)
+            // Extra room on the right keeps rows clear of the scrollbar.
+            .padding([12, 12, 12, 8]);
+        if app.filter == Filter::All {
+            column = column.push(status_row(app));
         }
-        widget::scrollable(column).height(Length::Fill).into()
+        if visible.is_empty() {
+            let text = match app.filter {
+                Filter::Unread => "No unread chats",
+                Filter::Groups => "No groups",
+                Filter::Favourites => "No favourites yet — right-click a chat to add it",
+                Filter::All => "No chats yet",
+            };
+            empty_list(text, false)
+        } else {
+            for chat in visible {
+                let selected = app.selected.as_ref() == Some(&chat.id);
+                let picture = app.avatars.get(&chat.id).map(std::path::PathBuf::as_path);
+                let menu_open = app.chat_menu_for.as_ref() == Some(&chat.id);
+                let extra = app.chat_extras.get(&chat.id).copied().unwrap_or_default();
+                column = column.push(row(chat, extra, selected, now, picture, menu_open));
+            }
+            widget::scrollable(column).height(Length::Fill).into()
+        }
     };
 
-    widget::column::with_capacity(4)
-        .push(header)
-        .push(widget::divider::horizontal::light())
-        .push(search)
-        .push(list)
-        .height(Length::Fill)
-        .into()
+    container(
+        widget::column::with_capacity(3)
+            .push(header)
+            .push(
+                widget::column::with_capacity(2)
+                    .spacing(12)
+                    .padding([0, 12])
+                    .push(search)
+                    .push_maybe((!searching).then_some(chips)),
+            )
+            .push(list)
+            .height(Length::Fill),
+    )
+    .height(Length::Fill)
+    .class(style::surface(|p| p.sidebar_bg, 0.0))
+    .into()
+}
+
+/// A text field with no fill or outline of its own, for use inside a pill.
+pub fn bare_input() -> theme::TextInput {
+    fn look(theme: &cosmic::Theme) -> cosmic::widget::text_input::Appearance {
+        let p = style::palette(theme);
+        cosmic::widget::text_input::Appearance {
+            background: cosmic::iced::Background::Color(cosmic::iced::Color::TRANSPARENT),
+            border_radius: 0.0.into(),
+            border_offset: None,
+            border_width: 0.0,
+            border_color: cosmic::iced::Color::TRANSPARENT,
+            label_color: style::color(p.text_secondary),
+            placeholder_color: style::color(p.text_secondary),
+            selected_text_color: style::color(p.on_accent),
+            icon_color: Some(style::color(p.text_secondary)),
+            text_color: Some(style::color(p.text)),
+            selected_fill: style::color(p.accent),
+        }
+    }
+    theme::TextInput::Custom {
+        active: Box::new(look),
+        error: Box::new(look),
+        hovered: Box::new(look),
+        focused: Box::new(look),
+        disabled: Box::new(look),
+    }
+}
+
+fn empty_list<'a>(text: &'static str, with_logo: bool) -> Element<'a, Message> {
+    container(
+        widget::column::with_capacity(2)
+            .spacing(8)
+            .align_x(Alignment::Center)
+            .push_maybe(with_logo.then(|| widgets::app_logo(40)))
+            .push(
+                sized(text, size::TEXT_BODY)
+                    .align_x(Alignment::Center)
+                    .class(theme::Text::Custom(style::text_secondary)),
+            ),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .padding(24)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn filter_chip<'a>(label: String, filter: Filter, active: Filter) -> Element<'a, Message> {
+    let selected = filter == active;
+    let text = sized(label, size::TEXT_PREVIEW).wrapping(Wrapping::None);
+    let text = if selected {
+        text.font(cosmic::font::semibold())
+            .class(theme::Text::Custom(style::text_on_accent))
+    } else {
+        text.class(theme::Text::Custom(style::text))
+    };
+    button::custom(
+        container(text)
+            .height(Length::Fixed(size::CHIP_HEIGHT))
+            .align_y(Alignment::Center)
+            .padding([0.0, size::CHIP_PAD_X]),
+    )
+    .padding(0)
+    .class(if selected {
+        style::flat_button(|p| p.accent, |p| p.on_accent, size::CHIP_HEIGHT / 2.0)
+    } else {
+        style::flat_button(|p| p.component, |p| p.text, size::CHIP_HEIGHT / 2.0)
+    })
+    .on_press(Message::SetFilter(filter))
+    .into()
+}
+
+/// A list row: fixed height, avatar (or other leading element), two lines.
+fn row_frame<'a>(
+    leading: Element<'a, Message>,
+    top: Element<'a, Message>,
+    bottom: Element<'a, Message>,
+    selected: bool,
+    on_press: Message,
+) -> cosmic::widget::Button<'a, Message> {
+    button::custom(
+        widget::row::with_capacity(2)
+            .align_y(Alignment::Center)
+            .spacing(12)
+            .height(Length::Fixed(size::ROW_HEIGHT))
+            .padding([0.0, size::ROW_PAD_X])
+            .push(leading)
+            .push(
+                widget::column::with_capacity(2)
+                    .spacing(4)
+                    .width(Length::Fill)
+                    .push(top)
+                    .push(bottom),
+            ),
+    )
+    .padding(0)
+    .width(Length::Fill)
+    .class(list_row_class(selected))
+    .on_press(on_press)
 }
 
 /// The "Status" entry at the top of the list.
 fn status_row(app: &App) -> Element<'_, Message> {
-    let space = theme::spacing();
     let selected = app.selected.as_ref().is_some_and(ChatId::is_status);
     let has_updates = app.status_senders > 0;
     let ring = container(icon::from_name("camera-photo-symbolic").size(20))
-        .width(Length::Fixed(44.0))
-        .height(Length::Fixed(44.0))
+        .width(Length::Fixed(size::AVATAR_ROW))
+        .height(Length::Fixed(size::AVATAR_ROW))
         .align_x(Alignment::Center)
         .align_y(Alignment::Center)
-        .class(theme::Container::custom(move |theme| {
-            let cosmic = theme.cosmic();
-            container::Style {
-                background: Some(cosmic::iced::Background::Color(widgets::with_alpha(
-                    cosmic.accent_color().into(),
-                    0.18,
-                ))),
-                border: cosmic::iced::Border {
-                    radius: 22.0.into(),
-                    width: if has_updates { 2.0 } else { 0.0 },
-                    color: cosmic.accent_color().into(),
-                },
-                ..container::Style::default()
-            }
-        }));
+        .class(style::outlined(
+            |p| Some(p.component),
+            |p| p.accent,
+            if has_updates { 2.0 } else { 0.0 },
+            size::AVATAR_ROW / 2.0,
+        ));
     let caption = match app.status_senders {
         0 => "No recent updates".to_owned(),
         1 => "1 contact posted an update".to_owned(),
         n => format!("{n} contacts posted updates"),
     };
-    let content = widget::row::with_capacity(2)
-        .spacing(space.space_s)
-        .align_y(Alignment::Center)
-        .push(ring)
-        .push(
-            widget::column::with_capacity(2)
-                .spacing(space.space_xxxs)
-                .width(Length::Fill)
-                .push(widget::text::body("Status").font(cosmic::font::semibold()))
-                .push(widget::text::caption(caption).class(theme::Text::Custom(widgets::dim_text))),
-        );
-    button::custom(content)
-        .width(Length::Fill)
-        .padding([space.space_xs, space.space_s])
-        .class(list_row_class(selected))
-        .on_press(Message::OpenStatus)
-        .into()
+    row_frame(
+        ring.into(),
+        sized("Status", size::TEXT_NAME)
+            .font(cosmic::font::semibold())
+            .class(theme::Text::Custom(style::text))
+            .into(),
+        sized(caption, size::TEXT_PREVIEW)
+            .wrapping(Wrapping::None)
+            .ellipsize(ONE_LINE)
+            .width(Length::Fill)
+            .class(theme::Text::Custom(style::text_secondary))
+            .into(),
+        selected,
+        Message::OpenStatus,
+    )
+    .into()
 }
 
 /// Chats whose name matches, then messages whose text matches.
 fn search_results(app: &App, now: DateTime<Local>) -> Element<'_, Message> {
-    let space = theme::spacing();
     let section = |label: &'static str| {
         container(
-            widget::text::caption_heading(label).class(theme::Text::Custom(widgets::dim_text)),
+            sized(label, size::TEXT_META)
+                .font(cosmic::font::semibold())
+                .class(theme::Text::Custom(style::text_secondary)),
         )
-        .padding([
-            space.space_xs,
-            space.space_s,
-            space.space_xxs,
-            space.space_s,
-        ])
+        .padding([8.0, size::ROW_PAD_X, 4.0, size::ROW_PAD_X])
     };
     let mut column = widget::column::with_capacity(app.search_results.len() + app.chats.len() + 2)
-        .spacing(space.space_xxxs)
-        .padding([0, space.space_xs, space.space_xs, space.space_xs]);
+        .spacing(size::ROW_GAP)
+        .padding([8, 8]);
     let chats: Vec<&Chat> = app
         .chats
         .iter()
@@ -218,7 +438,8 @@ fn search_results(app: &App, now: DateTime<Local>) -> Element<'_, Message> {
         for chat in chats {
             let selected = app.selected.as_ref() == Some(&chat.id);
             let picture = app.avatars.get(&chat.id).map(std::path::PathBuf::as_path);
-            column = column.push(row(chat, selected, now, picture, false));
+            let extra = app.chat_extras.get(&chat.id).copied().unwrap_or_default();
+            column = column.push(row(chat, extra, selected, now, picture, false));
         }
     }
     if !app.search_results.is_empty() {
@@ -228,13 +449,7 @@ fn search_results(app: &App, now: DateTime<Local>) -> Element<'_, Message> {
         }
     }
     if nothing {
-        return container(
-            widget::text::body("No results").class(theme::Text::Custom(widgets::dim_text)),
-        )
-        .width(Length::Fill)
-        .padding(space.space_m)
-        .align_x(Alignment::Center)
-        .into();
+        return empty_list("No results", false);
     }
     widget::scrollable(column).height(Length::Fill).into()
 }
@@ -244,11 +459,8 @@ fn message_result<'a>(
     msg: &'a wa_core::Message,
     now: DateTime<Local>,
 ) -> Element<'a, Message> {
-    let space = theme::spacing();
-    let chat_name = app
-        .chats
-        .iter()
-        .find(|c| c.id == msg.chat)
+    let chat = app.chats.iter().find(|c| c.id == msg.chat);
+    let chat_name = chat
         .map(|c| c.name.as_str())
         .unwrap_or_else(|| msg.chat.user());
     let who = if msg.from_me {
@@ -265,138 +477,190 @@ fn message_result<'a>(
     } else {
         format!("{who}: {}", msg.content.preview())
     };
-    let content = widget::column::with_capacity(2)
-        .spacing(space.space_xxxs)
-        .width(Length::Fill)
+    let top = widget::row::with_capacity(2)
+        .spacing(6)
+        .align_y(Alignment::Center)
         .push(
-            widget::row::with_capacity(2)
-                .spacing(space.space_xs)
-                .push(
-                    widget::text::body(chat_name)
-                        .font(cosmic::font::semibold())
-                        .wrapping(Wrapping::None)
-                        .width(Length::Fill),
-                )
-                .push(
-                    widget::text::caption(format_time(msg.timestamp, now))
-                        .class(theme::Text::Custom(widgets::dim_text)),
-                ),
+            sized(chat_name, size::TEXT_NAME)
+                .font(cosmic::font::semibold())
+                .wrapping(Wrapping::None)
+                .ellipsize(ONE_LINE)
+                .class(theme::Text::Custom(style::text))
+                .width(Length::Fill),
         )
         .push(
-            widget::text::caption(snippet)
-                .wrapping(Wrapping::None)
-                .class(theme::Text::Custom(widgets::dim_text)),
+            sized(format_time(msg.timestamp, now), size::TEXT_META)
+                .class(theme::Text::Custom(style::text_secondary)),
         );
-    button::custom(content)
-        .width(Length::Fill)
-        .padding([space.space_xs, space.space_s])
-        .class(list_row_class(false))
-        .on_press(Message::OpenSearchResult {
+    row_frame(
+        widgets::avatar(
+            chat_name,
+            &msg.chat.0,
+            size::AVATAR_ROW,
+            app.avatars.get(&msg.chat).map(std::path::PathBuf::as_path),
+        ),
+        top.into(),
+        sized(snippet, size::TEXT_PREVIEW)
+            .wrapping(Wrapping::None)
+            .ellipsize(ONE_LINE)
+            .width(Length::Fill)
+            .class(theme::Text::Custom(style::text_secondary))
+            .into(),
+        false,
+        Message::OpenSearchResult {
             chat: msg.chat.clone(),
             message: msg.id.clone(),
-        })
-        .into()
+        },
+    )
+    .into()
 }
 
 fn row<'a>(
     chat: &'a Chat,
+    extra: ChatExtra,
     selected: bool,
     now: DateTime<Local>,
     picture: Option<&'a std::path::Path>,
     menu_open: bool,
 ) -> Element<'a, Message> {
-    let space = theme::spacing();
     let time = if chat.last_activity > 0 {
         format_time(chat.last_activity, now)
     } else {
         String::new()
     };
+    // Unread shows in weight and the badge as well as colour.
     let unread = chat.unread > 0;
+    let weight = if unread {
+        cosmic::font::bold()
+    } else {
+        cosmic::font::semibold()
+    };
+    let small_icon = |name: &'static str| {
+        icon::from_name(name)
+            .size(14)
+            .icon()
+            .class(style::icon_color(|p| p.text_secondary))
+    };
 
-    let top = widget::row::with_capacity(2)
-        .spacing(space.space_xs)
+    let mut top = widget::row::with_capacity(4)
+        .spacing(6)
         .align_y(Alignment::Center)
         .push(
-            widget::text::body(chat.name.as_str())
-                .font(cosmic::font::semibold())
+            sized(chat.name.as_str(), size::TEXT_NAME)
+                .font(weight)
                 .wrapping(Wrapping::None)
+                .ellipsize(ONE_LINE)
+                .class(theme::Text::Custom(style::text))
                 .width(Length::Fill),
-        )
-        .push(widget::text::caption(time).class(if unread && !chat.muted {
-            theme::Text::Custom(widgets::accent_text)
-        } else {
-            theme::Text::Custom(widgets::dim_text)
-        }));
+        );
+    if extra.pinned {
+        top = top.push(small_icon("pin-symbolic"));
+    }
+    if chat.muted {
+        top = top.push(small_icon("notification-disabled-symbolic"));
+    }
+    top = top.push(
+        sized(time, size::TEXT_META)
+            .font(weight)
+            .class(theme::Text::Custom(if unread && !chat.muted {
+                style::text_accent
+            } else {
+                style::text_secondary
+            })),
+    );
 
     let preview = chat.last_preview.clone().unwrap_or_default();
+    // Fixed height so rows with and without a badge are equally tall.
     let mut bottom = widget::row::with_capacity(3)
-        .spacing(space.space_xxs)
-        .align_y(Alignment::Center)
-        .push(
-            widget::text::caption(preview)
-                .wrapping(Wrapping::None)
-                .width(Length::Fill)
-                .class(if unread {
-                    theme::Text::Default
-                } else {
-                    theme::Text::Custom(widgets::dim_text)
-                }),
+        .spacing(6)
+        .height(Length::Fixed(widgets::COUNT_PILL_SIZE))
+        .align_y(Alignment::Center);
+    if let Some(status) = extra.last_sent_status
+        && let Some(handle) = widgets::status_icon(status)
+    {
+        let read = status == wa_core::MessageStatus::Read;
+        bottom = bottom.push(
+            icon::icon(handle)
+                .size(16)
+                .class(style::icon_color(move |p| {
+                    if read { p.accent } else { p.text_secondary }
+                })),
         );
-    if chat.muted {
-        bottom = bottom.push(icon::from_name("audio-volume-muted-symbolic").size(14));
     }
+    bottom = bottom.push(
+        sized(preview, size::TEXT_PREVIEW)
+            .wrapping(Wrapping::None)
+            .ellipsize(ONE_LINE)
+            .width(Length::Fill)
+            .class(theme::Text::Custom(if unread {
+                style::text
+            } else {
+                style::text_secondary
+            })),
+    );
     if unread {
         bottom = bottom.push(widgets::count_pill(chat.unread, chat.muted));
     }
 
-    let content = widget::row::with_capacity(2)
-        .spacing(space.space_s)
-        .align_y(Alignment::Center)
-        .push(widgets::avatar(&chat.name, &chat.id.0, 44.0, picture))
-        .push(
-            widget::column::with_capacity(2)
-                .spacing(space.space_xxxs)
-                .width(Length::Fill)
-                .push(top)
-                .push(bottom),
-        );
-
-    let row = mouse_area(
-        button::custom(content)
-            .width(Length::Fill)
-            .padding([space.space_xs, space.space_s])
-            .class(list_row_class(selected))
-            .on_press(Message::SelectChat(chat.id.clone())),
-    )
+    let row = mouse_area(row_frame(
+        widgets::avatar(&chat.name, &chat.id.0, size::AVATAR_ROW, picture),
+        top.into(),
+        bottom.into(),
+        selected,
+        Message::SelectChat(chat.id.clone()),
+    ))
     .on_right_press(Message::OpenChatMenu(chat.id.clone()));
     if !menu_open {
         return row.into();
     }
     popover(row)
-        .popup(chat_menu(chat))
+        .popup(chat_menu(chat, extra))
         .position(widget::popover::Position::Bottom)
         .on_close(Message::CloseChatMenu)
         .into()
 }
 
 /// Right-click menu of a chat row.
-fn chat_menu<'a>(chat: &'a Chat) -> Element<'a, Message> {
+fn chat_menu<'a>(chat: &'a Chat, extra: ChatExtra) -> Element<'a, Message> {
     let space = theme::spacing();
-    container(
+    let item = |label: &'static str, icon_name: &'static str, message: Message| {
         button::custom(
             widget::row::with_capacity(2)
                 .spacing(space.space_xs)
                 .align_y(Alignment::Center)
-                .push(icon::from_name("edit-delete-symbolic").size(16))
-                .push(widget::text::body("Delete chat")),
+                .push(icon::from_name(icon_name).size(16))
+                .push(widget::text::body(label)),
         )
         .width(Length::Fill)
         .padding([space.space_xxs, space.space_s])
         .class(theme::Button::MenuItem)
-        .on_press(Message::AskDeleteChat(chat.id.clone())),
+        .on_press(message)
+    };
+    container(
+        widget::column::with_capacity(4)
+            .push(item(
+                if extra.pinned { "Unpin" } else { "Pin to top" },
+                "pin-symbolic",
+                Message::TogglePinned(chat.id.clone()),
+            ))
+            .push(item(
+                if extra.favourite {
+                    "Remove from favourites"
+                } else {
+                    "Add to favourites"
+                },
+                "starred-symbolic",
+                Message::ToggleFavourite(chat.id.clone()),
+            ))
+            .push(widget::divider::horizontal::light())
+            .push(item(
+                "Delete chat",
+                "edit-delete-symbolic",
+                Message::AskDeleteChat(chat.id.clone()),
+            )),
     )
     .padding(space.space_xxs)
-    .width(Length::Fixed(220.0))
+    .width(Length::Fixed(240.0))
     .class(theme::Container::Dropdown)
     .into()
 }
@@ -407,6 +671,53 @@ mod tests {
 
     fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Local> {
         Local.with_ymd_and_hms(y, m, d, h, min, 0).single().unwrap()
+    }
+
+    #[test]
+    fn last_seen_labels() {
+        let now = at(2026, 11, 25, 15, 0);
+        let label = |t: DateTime<Local>| last_seen_label(t.timestamp_millis(), now).unwrap();
+        assert_eq!(
+            label(at(2026, 11, 25, 14, 52)),
+            "last seen today at 2:52 PM"
+        );
+        assert_eq!(
+            label(at(2026, 11, 24, 9, 5)),
+            "last seen yesterday at 9:05 AM"
+        );
+        assert!(label(at(2026, 11, 22, 9, 5)).starts_with("last seen Sunday at"));
+        assert_eq!(
+            label(at(2026, 10, 1, 9, 5)),
+            "last seen 1 Oct 2026 at 9:05 AM"
+        );
+    }
+
+    #[test]
+    fn filters_pick_the_right_chats() {
+        let chat = |kind, unread| Chat {
+            id: ChatId("1@s.whatsapp.net".into()),
+            kind,
+            name: "A".into(),
+            last_activity: 0,
+            unread,
+            muted: false,
+            last_preview: None,
+        };
+        let direct = chat(wa_core::ChatKind::Direct, 0);
+        let group = chat(wa_core::ChatKind::Group, 3);
+        let fav = ChatExtra {
+            favourite: true,
+            ..ChatExtra::default()
+        };
+        assert!(Filter::All.shows(&direct, None));
+        assert!(!Filter::Unread.shows(&direct, None));
+        assert!(Filter::Unread.shows(&group, None));
+        assert!(Filter::Groups.shows(&group, None));
+        assert!(!Filter::Groups.shows(&direct, None));
+        assert!(!Filter::Favourites.shows(&direct, None));
+        assert!(Filter::Favourites.shows(&direct, Some(&fav)));
+        assert_eq!(unread_chip_label(0), "Unread");
+        assert_eq!(unread_chip_label(3), "Unread \u{b7} 3");
     }
 
     #[test]

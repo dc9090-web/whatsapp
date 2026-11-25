@@ -21,7 +21,10 @@ pub const AUTO_DOWNLOAD_MAX_BYTES: u64 = 16 * 1024 * 1024;
 pub fn auto_download(content: &MessageContent) -> bool {
     match content {
         MessageContent::Sticker { .. } => true,
-        MessageContent::Image { media, .. } => media.size <= AUTO_DOWNLOAD_MAX_BYTES,
+        MessageContent::Image { media, .. }
+        | MessageContent::Video {
+            media, gif: true, ..
+        } => media.size <= AUTO_DOWNLOAD_MAX_BYTES,
         _ => false,
     }
 }
@@ -40,6 +43,24 @@ pub struct Thumb {
 /// present, otherwise the inline JPEG thumbnail. Downscaled to `max_px`.
 pub fn decode_thumb(media: &MediaRef, max_px: u32) -> Option<Thumb> {
     if let Some(path) = media.local_path.as_deref().filter(|p| p.exists()) {
+        // A GIF clip: its first frame is the picture.
+        if media.mime.starts_with("video/") {
+            match crate::gifplay::decode(path, max_px, 1) {
+                Ok(mut clip) => {
+                    return Some(Thumb {
+                        handle: widget::image::Handle::from_rgba(
+                            clip.width,
+                            clip.height,
+                            clip.frames.swap_remove(0),
+                        ),
+                        width: clip.width,
+                        height: clip.height,
+                        full: true,
+                    });
+                }
+                Err(err) => tracing::debug!(%err, path = %path.display(), "no frame from clip"),
+            }
+        }
         match image::open(path) {
             Ok(img) => return Some(to_thumb(img, max_px, true)),
             Err(err) => tracing::debug!(?err, path = %path.display(), "cannot decode media file"),
@@ -110,6 +131,18 @@ pub struct MediaState<'a> {
     pub outgoing: bool,
     /// Where the file was saved to, if the user saved it.
     pub saved: Option<&'a Path>,
+    /// The frame to show while this message's GIF is playing.
+    pub gif_frame: Option<&'a GifFrame>,
+    /// The GIF's frames are being decoded.
+    pub gif_loading: bool,
+}
+
+/// One frame of a playing GIF, with its pixel size.
+#[derive(Debug, Clone)]
+pub struct GifFrame {
+    pub handle: widget::image::Handle,
+    pub width: u32,
+    pub height: u32,
 }
 
 pub fn view<'a>(
@@ -124,6 +157,9 @@ pub fn view<'a>(
             duration_secs,
             media,
         } => audio(*voice_note, *duration_secs, media, &state),
+        MessageContent::Video {
+            media, gif: true, ..
+        } => gif(media, &state),
         MessageContent::Video { media, .. } => {
             file_row("video-x-generic-symbolic", "Video", media, &state)
         }
@@ -186,6 +222,76 @@ fn visual<'a>(media: &'a MediaRef, state: &MediaState<'a>, sticker: bool) -> Ele
     }
     if !sticker {
         column = column.push(save_row(state, shown_width));
+    }
+    column.into()
+}
+
+/// A GIF: a picture that plays in place when clicked, and stops on the next
+/// click.
+fn gif<'a>(media: &'a MediaRef, state: &MediaState<'a>) -> Element<'a, Message> {
+    let space = theme::spacing();
+    let picture = |handle: &widget::image::Handle, width: u32, height: u32| {
+        let (w, h) = fit_size(width, height, MAX_INLINE);
+        let image: Element<'a, Message> = widget::image(handle.clone())
+            .width(Length::Fixed(w))
+            .height(Length::Fixed(h))
+            .content_fit(ContentFit::Cover)
+            .border_radius([10.0; 4])
+            .into();
+        image
+    };
+    let playing = state.gif_frame.is_some();
+    let body: Element<'a, Message> = match (state.gif_frame, state.thumb) {
+        (Some(frame), _) => picture(&frame.handle, frame.width, frame.height),
+        (None, Some(thumb)) => picture(&thumb.handle, thumb.width, thumb.height),
+        (None, None) => container(icon::from_name("image-x-generic-symbolic").size(48))
+            .width(Length::Fixed(MAX_INLINE))
+            .height(Length::Fixed(MAX_INLINE * 0.56))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .class(crate::style::surface(|p| p.selected, 10.0))
+            .into(),
+    };
+    // A small "GIF" tag in the corner says it will move when clicked.
+    let body: Element<'a, Message> = if playing {
+        body
+    } else {
+        let tag = container(
+            widget::text(if state.gif_loading { "…" } else { "GIF" })
+                .size(11)
+                .font(cosmic::font::bold())
+                .class(theme::Text::Color(Color::WHITE)),
+        )
+        .padding([2, 7])
+        .class(theme::Container::custom(|_| container::Style {
+            background: Some(Background::Color(with_alpha(Color::BLACK, 0.6))),
+            border: Border {
+                radius: 6.0.into(),
+                ..Border::default()
+            },
+            ..container::Style::default()
+        }));
+        cosmic::iced::widget::stack![
+            body,
+            container(tag)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Start)
+                .align_y(Alignment::End)
+                .padding(8),
+        ]
+        .into()
+    };
+    let mut column = widget::column::with_capacity(2)
+        .spacing(space.space_xxxs)
+        .push(
+            button::custom(body)
+                .padding(0)
+                .class(theme::Button::Image)
+                .on_press(Message::ToggleGif(state.id.clone())),
+        );
+    if let Some(status) = status_line(state, media) {
+        column = column.push(status);
     }
     column.into()
 }
@@ -458,6 +564,7 @@ pub fn save_name(content: &MessageContent, local: &Path, timestamp_ms: i64) -> S
         }
         MessageContent::Document { .. } => "Document",
         MessageContent::Image { .. } => "Image",
+        MessageContent::Video { gif: true, .. } => "GIF",
         MessageContent::Video { .. } => "Video",
         MessageContent::Sticker { .. } => "Sticker",
         MessageContent::Audio { .. } => "Audio",

@@ -10,8 +10,13 @@ mod backend_sub;
 mod config;
 mod desktop;
 mod fonts;
+mod gifplay;
+mod giphy;
 mod pages;
+mod recorder;
 mod signals;
+mod style;
+mod tokens;
 mod widgets;
 
 use std::path::PathBuf;

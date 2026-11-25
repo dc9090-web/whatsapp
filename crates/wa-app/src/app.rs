@@ -22,7 +22,6 @@ use crate::pages::conversation::{self, Conversation, PAGE_SIZE};
 use crate::pages::{self, Page};
 use crate::signals;
 use crate::widgets::media::{self, MAX_INLINE, Thumb};
-use crate::widgets::reactions::ALL_EMOJIS;
 
 pub const APP_ID: &str = "com.github.whatsapp-cosmic";
 const TITLE: &str = "WhatsApp";
@@ -53,6 +52,63 @@ pub enum Dialog {
     ConfirmDeleteChat(ChatId),
     ConfirmLeaveGroup(ChatId),
     NewGroup,
+    NewChat,
+}
+
+/// A GIF playing in place.
+#[derive(Debug, Clone)]
+pub struct GifPlay {
+    pub id: MessageId,
+    pub frames: Vec<crate::widgets::media::GifFrame>,
+    pub started: std::time::Instant,
+}
+
+impl GifPlay {
+    /// The frame to show right now (the clip loops).
+    pub fn current(&self) -> &crate::widgets::media::GifFrame {
+        let index = crate::gifplay::frame_at(self.started.elapsed().as_millis(), self.frames.len());
+        &self.frames[index]
+    }
+}
+
+/// Search within the open conversation.
+#[derive(Debug, Clone, Default)]
+pub struct ChatSearch {
+    pub query: String,
+    /// Matching messages, newest first.
+    pub hits: Vec<MessageId>,
+    /// Which hit is shown.
+    pub index: usize,
+}
+
+/// What we know about a contact's availability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Presence {
+    pub online: bool,
+    /// Unix ms; `None` when the contact hides it.
+    pub last_seen: Option<i64>,
+}
+
+/// A GIF search result with its preview ready to draw.
+#[derive(Debug, Clone)]
+pub struct GifResult {
+    pub gif: crate::giphy::Gif,
+    pub preview: Option<widget::image::Handle>,
+}
+
+/// State of the composer's GIF search panel.
+#[derive(Debug, Clone, Default)]
+pub struct GifPanel {
+    pub open: bool,
+    pub query: String,
+    pub results: Vec<GifResult>,
+    /// A search is running.
+    pub searching: bool,
+    /// The chosen GIF is being downloaded.
+    pub downloading: bool,
+    pub error: Option<String>,
+    /// Number of the latest search, so a slow older one cannot overwrite it.
+    pub search_no: u64,
 }
 
 /// What the call banner shows.
@@ -140,6 +196,69 @@ pub enum Message {
     OpenMessageMenu(MessageId),
     CloseMessageMenu,
     OpenEmojiPicker(MessageId),
+    /// Shows or hides the composer's emoji panel.
+    ToggleEmojiPanel,
+    CloseEmojiPanel,
+    /// Appends an emoji to the message being typed; the panel stays open.
+    InsertEmoji(&'static str),
+    /// Shows or hides the composer's GIF search panel.
+    ToggleGifPanel,
+    CloseGifPanel,
+    GifQueryChanged(String),
+    /// Runs the GIF search for the current query (trending when blank).
+    GifSearch,
+    /// Search number `.0` finished.
+    GifResults(u64, Result<Vec<crate::giphy::Gif>, String>),
+    /// The GIF at this index of the results was chosen.
+    GifPicked(usize),
+    GifDownloaded(Result<PathBuf, String>),
+    SetGiphyKey(String),
+    /// Shows or hides the search field of the open conversation.
+    ToggleChatSearch,
+    ChatSearchChanged(String),
+    /// Moves to the next older (`true`) or newer match.
+    ChatSearchStep(bool),
+    /// Opens group info or contact details for the open conversation.
+    ShowChatInfo,
+    CloseContactInfo,
+    /// Starts recording a voice message.
+    StartRecording,
+    /// Ends the recording: `true` sends it, `false` throws it away.
+    StopRecording(bool),
+    RecordingFinished(Result<Option<crate::recorder::VoiceNote>, String>),
+    /// Redraws the recording timer.
+    RecordTick,
+    WindowUnfocused(window::Id),
+    /// Plays the GIF in this message in place, or stops it.
+    ToggleGif(MessageId),
+    GifFramesReady(
+        MessageId,
+        Result<std::sync::Arc<crate::gifplay::Frames>, String>,
+    ),
+    /// Redraws the playing GIF.
+    GifTick,
+    /// Starts moving the window (a pane header was pressed).
+    WindowDrag,
+    WindowMaximize,
+    WindowMinimize,
+    SetFilter(pages::chats::Filter),
+    /// Opens the "New chat" dialog.
+    NewChat,
+    /// The name or phone number typed into the "New chat" dialog.
+    NewChatQuery(String),
+    /// Opens (starting it if need be) the direct chat with this contact.
+    StartChat(ChatId),
+    TogglePinned(ChatId),
+    ToggleFavourite(ChatId),
+    /// Notification volume, 0–100 (while dragging the slider).
+    SetSoundVolume(u8),
+    /// Plays the notification sound as it is now set up.
+    TestSound,
+    PickSoundFile,
+    /// The chosen sound file; `None` if the chooser was cancelled.
+    SoundFilePicked(Option<PathBuf>),
+    /// Back to the built-in chime.
+    ResetSoundFile,
     CopyText(String),
     Hover(Option<MessageId>),
     /// The pointer left this message's bubble/actions area.
@@ -242,6 +361,30 @@ pub struct App {
     pub menu_for: Option<MessageId>,
     /// Chat whose right-click menu is open.
     pub chat_menu_for: Option<ChatId>,
+    /// The composer's emoji panel is showing.
+    pub emoji_panel_open: bool,
+    /// The composer's GIF search panel.
+    pub gifs: GifPanel,
+    /// Search within the open conversation, when its bar is showing.
+    pub chat_search: Option<ChatSearch>,
+    /// The contact-details drawer for the open direct chat.
+    pub show_contact_info: bool,
+    /// Online state and last seen of contacts we asked about.
+    pub presence: HashMap<ChatId, Presence>,
+    /// Chats somebody is typing in.
+    pub typing: HashSet<ChatId>,
+    /// The voice message being recorded.
+    pub recording: Option<crate::recorder::Recorder>,
+    /// The GIF playing in the conversation.
+    pub gif_play: Option<GifPlay>,
+    /// The GIF being downloaded or decoded before it plays.
+    pub gif_loading: Option<MessageId>,
+    /// Which chats the list shows.
+    pub filter: pages::chats::Filter,
+    /// Name or phone number typed into the "New chat" dialog.
+    pub new_chat_query: String,
+    /// Pinned / favourite / read-tick details per chat.
+    pub chat_extras: HashMap<ChatId, wa_core::store::ChatExtra>,
     pub dialog: Option<Dialog>,
     pub header_menu_open: bool,
     pub show_settings: bool,
@@ -377,6 +520,18 @@ impl App {
             hovered: None,
             menu_for: None,
             chat_menu_for: None,
+            emoji_panel_open: false,
+            gifs: GifPanel::default(),
+            chat_search: None,
+            show_contact_info: false,
+            presence: HashMap::new(),
+            typing: HashSet::new(),
+            recording: None,
+            gif_play: None,
+            gif_loading: None,
+            filter: pages::chats::Filter::default(),
+            new_chat_query: String::new(),
+            chat_extras: HashMap::new(),
             dialog: None,
             header_menu_open: false,
             show_settings: false,
@@ -442,6 +597,10 @@ impl App {
             return Task::none();
         };
         let chats = store.chats();
+        match store.chat_extras() {
+            Ok(extras) => self.chat_extras = extras,
+            Err(err) => tracing::error!(?err, "failed to load chat details"),
+        }
         let total = store.total_unread();
         let avatars = store.chat_avatars();
         let updates = store.messages(&ChatId::status(), None, 300);
@@ -450,6 +609,10 @@ impl App {
                 self.chats = chats;
                 // Status updates have their own page, not a chat row.
                 self.chats.retain(|c| !c.id.is_status());
+                // Pinned chats first; each group keeps its newest-first order.
+                let extras = &self.chat_extras;
+                self.chats
+                    .sort_by_key(|c| !extras.get(&c.id).is_some_and(|e| e.pinned));
             }
             Err(err) => self.store_error("Failed to load chats", err),
         }
@@ -659,7 +822,11 @@ impl App {
         let mut tasks = Vec::new();
         for msg in &conv.messages {
             let media = match &msg.content {
-                MessageContent::Image { media, .. } | MessageContent::Sticker { media } => media,
+                MessageContent::Image { media, .. }
+                | MessageContent::Sticker { media }
+                | MessageContent::Video {
+                    media, gif: true, ..
+                } => media,
                 _ => continue,
             };
             let has_local = media::local_file(media).is_some();
@@ -746,7 +913,38 @@ impl App {
         self.refresh_thumbs()
     }
 
+    /// Plays the notification sound with the user's volume and sound choice.
+    fn play_chime(&self) {
+        if let Some(audio) = &self.audio {
+            audio.chime(
+                f32::from(self.config.notification_volume) / 100.0,
+                self.config.sound_file(),
+            );
+        }
+    }
+
+    /// Starts a GIF search for the panel's query (trending when blank).
+    fn search_gifs(&mut self) -> Task<Message> {
+        let key = self.config.giphy_api_key.clone();
+        if key.is_empty() {
+            return Task::none();
+        }
+        self.gifs.search_no += 1;
+        self.gifs.searching = true;
+        self.gifs.error = None;
+        let search_no = self.gifs.search_no;
+        let query = self.gifs.query.clone();
+        cosmic::task::future(async move {
+            let result = tokio::task::spawn_blocking(move || crate::giphy::search(&key, &query))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+            Message::GifResults(search_no, result)
+        })
+    }
+
     fn open_chat(&mut self, id: ChatId) -> Task<Message> {
+        self.emoji_panel_open = false;
+        self.gifs.open = false;
         let chat = self
             .chats
             .iter()
@@ -764,6 +962,19 @@ impl App {
                     muted: true,
                     last_preview: None,
                 })
+            })
+            // A number we have not talked to yet: the chat appears in the
+            // list once the first message is sent.
+            .or_else(|| {
+                (!id.is_group()).then(|| wa_core::Chat {
+                    id: id.clone(),
+                    kind: wa_core::ChatKind::Direct,
+                    name: format!("+{}", id.user()),
+                    last_activity: 0,
+                    unread: 0,
+                    muted: false,
+                    last_preview: None,
+                })
             });
         let Some(chat) = chat else {
             tracing::warn!(chat = %id.0, "cannot open unknown chat");
@@ -778,10 +989,19 @@ impl App {
             self.group_info = None;
             self.invite_link = None;
             self.group_add_draft.clear();
-            if self.show_group_info {
+            if self.show_group_info || self.show_contact_info {
                 self.show_group_info = false;
+                self.show_contact_info = false;
                 self.set_show_context(false);
             }
+            self.chat_search = None;
+            self.gif_play = None;
+            self.gif_loading = None;
+            // A recording belongs to the chat it was started in.
+            self.recording = None;
+        }
+        if !id.is_group() && !id.is_status() {
+            self.send(BackendCommand::WatchPresence { chat: id.clone() });
         }
         self.page = Page::Main;
         self.selected = Some(id);
@@ -967,7 +1187,33 @@ impl App {
                 {
                     self.page = Page::Main;
                 }
+                let connected = state == ConnectionState::Connected;
                 self.connection = Some(state);
+                if connected && self.window_focused() {
+                    self.go_online();
+                }
+                Task::none()
+            }
+            BackendEvent::Presence {
+                chat,
+                online,
+                last_seen,
+            } => {
+                // An "away" update without a time must not erase a known one.
+                let last_seen =
+                    last_seen.or_else(|| self.presence.get(&chat).and_then(|p| p.last_seen));
+                if !online {
+                    self.typing.remove(&chat);
+                }
+                self.presence.insert(chat, Presence { online, last_seen });
+                Task::none()
+            }
+            BackendEvent::Typing { chat, active } => {
+                if active {
+                    self.typing.insert(chat);
+                } else {
+                    self.typing.remove(&chat);
+                }
                 Task::none()
             }
             BackendEvent::LoggedOut => {
@@ -999,8 +1245,13 @@ impl App {
             BackendEvent::ChatUpserted(_) if self.page == Page::Sync => Task::none(),
             BackendEvent::Message(_) if self.page == Page::Sync => Task::none(),
             // `reload_chats` also refreshes the open conversation's chat.
-            BackendEvent::ChatUpserted(_) => self.schedule_reload(false),
+            BackendEvent::ChatUpserted(_) | BackendEvent::ReadElsewhere { .. } => {
+                self.schedule_reload(false)
+            }
             BackendEvent::Message(msg) => {
+                if !msg.from_me {
+                    self.typing.remove(&msg.chat);
+                }
                 if msg.from_me && self.own_jid.is_none() && !msg.sender.is_empty() {
                     self.own_jid = Some(msg.sender.clone());
                 }
@@ -1051,6 +1302,11 @@ impl App {
                     self.play_after_fetch = None;
                     tasks.push(self.play_voice(&message));
                 }
+                // A GIF that was clicked before it had downloaded.
+                if self.gif_loading.as_ref() == Some(&message) {
+                    self.gif_loading = None;
+                    tasks.push(self.update(Message::ToggleGif(message)));
+                }
                 Task::batch(tasks)
             }
             BackendEvent::MediaFailed { message, error, .. } => {
@@ -1060,6 +1316,9 @@ impl App {
                 self.save_after_fetch.remove(&message);
                 if self.play_after_fetch.as_ref() == Some(&message) {
                     self.play_after_fetch = None;
+                }
+                if self.gif_loading.as_ref() == Some(&message) {
+                    self.gif_loading = None;
                 }
                 self.media_errors.insert(message, "Download failed".into());
                 Task::none()
@@ -1096,10 +1355,8 @@ impl App {
                     muted: false,
                     seconds: 0,
                 });
-                if self.config.notification_sound
-                    && let Some(audio) = &self.audio
-                {
-                    audio.chime();
+                if self.config.notification_sound {
+                    self.play_chime();
                 }
                 let picture = self.avatars.get(&chat).cloned();
                 let focused = self.window_focused();
@@ -1233,10 +1490,8 @@ impl App {
         });
         let chat_id = msg.chat.0.clone();
         let picture = self.avatars.get(&msg.chat).cloned();
-        if self.config.notification_sound
-            && let Some(audio) = &self.audio
-        {
-            audio.chime();
+        if self.config.notification_sound {
+            self.play_chime();
         }
         cosmic::task::future(async move {
             desktop::notify(&chat_name, body.as_deref(), chat_id, picture);
@@ -1247,6 +1502,7 @@ impl App {
     fn apply_appearance(&mut self, appearance: Appearance) -> Task<Message> {
         self.config.appearance = appearance;
         self.config.save(self.config_handler.as_ref());
+        crate::style::set_tokyo_night(appearance == Appearance::TokyoNight);
         cosmic::command::set_theme(appearance.theme())
     }
 }
@@ -1356,6 +1612,11 @@ impl Application for App {
 
     fn init(core: Core, flags: Flags) -> (Self, Task<Message>) {
         let mut app = App::new(core, flags);
+        // The redesign has no title bar: the pane headers carry the window
+        // controls and act as the drag area.
+        app.core.window.show_headerbar = false;
+        app.core.window.content_container = false;
+        crate::style::set_tokyo_night(app.config.appearance == Appearance::TokyoNight);
         app.set_header_title(TITLE.to_owned());
         let task = match app.core.main_window_id() {
             Some(id) => app.set_window_title(TITLE.to_owned(), id),
@@ -1365,43 +1626,7 @@ impl Application for App {
     }
 
     fn header_end(&self) -> Vec<Element<'_, Message>> {
-        let space = theme::spacing();
-        let item = |label: &'static str, icon_name: &'static str, message: Message| {
-            button::custom(
-                widget::row::with_capacity(2)
-                    .spacing(space.space_xs)
-                    .align_y(Alignment::Center)
-                    .push(icon::from_name(icon_name).size(16))
-                    .push(widget::text::body(label)),
-            )
-            .width(Length::Fill)
-            .padding([space.space_xxs, space.space_s])
-            .class(theme::Button::MenuItem)
-            .on_press(message)
-        };
-        let toggle =
-            button::icon(icon::from_name("open-menu-symbolic")).on_press(Message::ToggleHeaderMenu);
-        let mut menu = popover(toggle).position(widget::popover::Position::Bottom);
-        if self.header_menu_open {
-            menu = menu
-                .popup(
-                    container(
-                        widget::column::with_capacity(2)
-                            .push(item("New group", "contact-new-symbolic", Message::NewGroup))
-                            .push(item(
-                                "Settings",
-                                "preferences-system-symbolic",
-                                Message::ShowSettings,
-                            ))
-                            .push(item("Quit", "application-exit-symbolic", Message::Quit)),
-                    )
-                    .padding(space.space_xxs)
-                    .width(Length::Fixed(200.0))
-                    .class(theme::Container::Dropdown),
-                )
-                .on_close(Message::ToggleHeaderMenu);
-        }
-        vec![menu.into()]
+        Vec::new()
     }
 
     fn context_drawer(&self) -> Option<context_drawer::ContextDrawer<'_, Message>> {
@@ -1420,6 +1645,20 @@ impl Application for App {
                     .title(title),
             );
         }
+        if self.show_contact_info {
+            let title = self
+                .conversation
+                .as_ref()
+                .map(|c| c.chat.name.clone())
+                .unwrap_or_else(|| "Contact".to_owned());
+            return Some(
+                context_drawer::context_drawer(
+                    pages::group::contact_view(self),
+                    Message::CloseContactInfo,
+                )
+                .title(title),
+            );
+        }
         if !self.show_settings {
             return None;
         }
@@ -1433,27 +1672,22 @@ impl Application for App {
         let space = theme::spacing();
         match self.dialog.as_ref()? {
             Dialog::EmojiPicker(target) => {
-                const PER_ROW: usize = 9;
-                let mut grid = widget::column::with_capacity(ALL_EMOJIS.len() / PER_ROW + 1)
-                    .spacing(space.space_xxxs)
-                    .width(Length::Fill);
-                for chunk in ALL_EMOJIS.chunks(PER_ROW) {
-                    let mut row = widget::row::with_capacity(PER_ROW).spacing(space.space_xxxs);
-                    for emoji in chunk {
-                        row = row.push(
-                            button::custom(widget::text(*emoji).size(24))
-                                .padding([space.space_xxs, space.space_xs])
-                                .class(theme::Button::Text)
-                                .on_press(Message::React(target.clone(), (*emoji).to_owned())),
-                        );
-                    }
-                    // Centred so a short last row does not hang on the left.
-                    grid = grid.push(container(row).width(Length::Fill).align_x(Alignment::Center));
-                }
+                let grid = crate::widgets::emoji::grid(9, |emoji| {
+                    Message::React(target.clone(), emoji.to_owned())
+                });
                 Some(
                     widget::dialog()
                         .title("Choose a reaction")
-                        .control(widget::scrollable(grid).height(Length::Fixed(320.0)))
+                        .control(
+                            container(
+                                widget::scrollable(
+                                    container(grid).padding([0, space.space_s, 0, 0]),
+                                )
+                                .height(Length::Fixed(360.0)),
+                            )
+                            .width(Length::Fill)
+                            .align_x(Alignment::Center),
+                        )
                         .secondary_action(button::standard("Cancel").on_press(Message::CloseDialog))
                         .into(),
                 )
@@ -1498,6 +1732,7 @@ impl Application for App {
                 )
             }
             Dialog::NewGroup => Some(pages::group::new_group_dialog(self)),
+            Dialog::NewChat => Some(pages::group::new_chat_dialog(self)),
             Dialog::ConfirmLeaveGroup(_) => Some(
                 widget::dialog()
                     .title("Leave group?")
@@ -1523,7 +1758,13 @@ impl Application for App {
             self.search_results.clear();
             return Task::none();
         }
-        if self.dialog.take().is_none()
+        if self.chat_search.take().is_some() {
+            self.highlight = None;
+            return Task::none();
+        }
+        if !std::mem::take(&mut self.emoji_panel_open)
+            && !std::mem::take(&mut self.gifs.open)
+            && self.dialog.take().is_none()
             && self.menu_for.take().is_none()
             && self.chat_menu_for.take().is_none()
             && !std::mem::take(&mut self.header_menu_open)
@@ -1561,11 +1802,27 @@ impl Application for App {
             } else {
                 Subscription::none()
             },
+            if self.gif_play.is_some() {
+                cosmic::iced::time::every(Duration::from_millis(
+                    1000 / u64::from(crate::gifplay::FPS),
+                ))
+                .map(|_| Message::GifTick)
+            } else {
+                Subscription::none()
+            },
+            if self.recording.is_some() {
+                cosmic::iced::time::every(Duration::from_millis(500)).map(|_| Message::RecordTick)
+            } else {
+                Subscription::none()
+            },
             window::close_requests().map(Message::CloseRequested),
             signals::subscription().map(|()| Message::Quit),
             cosmic::iced::event::listen_with(|event, _status, id| match event {
                 cosmic::iced::Event::Window(window::Event::Focused) => {
                     Some(Message::WindowFocused(id))
+                }
+                cosmic::iced::Event::Window(window::Event::Unfocused) => {
+                    Some(Message::WindowUnfocused(id))
                 }
                 cosmic::iced::Event::Window(window::Event::FileDropped(paths)) => {
                     Some(Message::FilesDropped(paths))
@@ -1574,7 +1831,10 @@ impl Application for App {
                     key: cosmic::iced::keyboard::Key::Character(c),
                     modifiers,
                     ..
-                }) if modifiers.control() && c.as_str().eq_ignore_ascii_case("f") => {
+                }) if modifiers.control()
+                    && (c.as_str().eq_ignore_ascii_case("f")
+                        || c.as_str().eq_ignore_ascii_case("k")) =>
+                {
                     Some(Message::FocusSearch)
                 }
                 _ => None,
@@ -1612,6 +1872,7 @@ impl Application for App {
                 // Messages that arrived in the open chat while the window was
                 // unfocused are read now that the user is looking at them.
                 if self.core.main_window_id() == Some(id) {
+                    self.go_online();
                     self.mark_open_chat_read()
                 } else {
                     Task::none()
@@ -1688,7 +1949,440 @@ impl Application for App {
                 self.composer = text;
                 Task::none()
             }
+            Message::ToggleEmojiPanel => {
+                self.emoji_panel_open = !self.emoji_panel_open;
+                self.gifs.open = false;
+                Task::none()
+            }
+            Message::ToggleGifPanel => {
+                self.gifs.open = !self.gifs.open;
+                self.emoji_panel_open = false;
+                if !self.gifs.open {
+                    return Task::none();
+                }
+                let focus = widget::text_input::focus(conversation::gif_search_id());
+                if self.gifs.results.is_empty() {
+                    Task::batch([focus, self.search_gifs()])
+                } else {
+                    focus
+                }
+            }
+            Message::CloseGifPanel => {
+                self.gifs.open = false;
+                widget::text_input::focus(conversation::composer_id())
+            }
+            Message::GifQueryChanged(query) => {
+                self.gifs.query = query;
+                Task::none()
+            }
+            Message::GifSearch => self.search_gifs(),
+            Message::GifResults(search_no, result) => {
+                if search_no != self.gifs.search_no {
+                    return Task::none();
+                }
+                self.gifs.searching = false;
+                match result {
+                    Ok(gifs) => {
+                        self.gifs.results = gifs
+                            .into_iter()
+                            .map(|mut gif| {
+                                let preview = gif.still.as_mut().map(|still| {
+                                    widget::image::Handle::from_rgba(
+                                        still.width,
+                                        still.height,
+                                        std::mem::take(&mut still.rgba),
+                                    )
+                                });
+                                GifResult { gif, preview }
+                            })
+                            .collect();
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "GIF search failed");
+                        self.gifs.results.clear();
+                        self.gifs.error = Some(error);
+                    }
+                }
+                Task::none()
+            }
+            Message::GifPicked(index) => {
+                let Some(result) = self.gifs.results.get(index) else {
+                    return Task::none();
+                };
+                if self.gifs.downloading || self.selected.is_none() {
+                    return Task::none();
+                }
+                self.gifs.downloading = true;
+                self.gifs.error = None;
+                let mut gif = result.gif.clone();
+                // The pixels moved into the preview handle; fetch them back
+                // for the thumbnail.
+                if let Some(still) = gif.still.as_mut()
+                    && let Some(widget::image::Handle::Rgba { pixels, .. }) = &result.preview
+                {
+                    still.rgba = pixels.to_vec();
+                }
+                cosmic::task::future(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let dir = wa_core::paths::media_dir().map_err(|e| e.to_string())?;
+                        crate::giphy::download(&gif, &dir)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    Message::GifDownloaded(result)
+                })
+            }
+            Message::GifDownloaded(result) => {
+                self.gifs.downloading = false;
+                match result {
+                    Ok(path) => {
+                        self.gifs.open = false;
+                        self.attachments.push_back(path);
+                        widget::text_input::focus(conversation::composer_id())
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "GIF download failed");
+                        self.gifs.error = Some(error);
+                        Task::none()
+                    }
+                }
+            }
+            Message::SetSoundVolume(volume) => {
+                self.config.notification_volume = volume.min(100);
+                self.config.save(self.config_handler.as_ref());
+                Task::none()
+            }
+            Message::TestSound => {
+                self.play_chime();
+                Task::none()
+            }
+            Message::PickSoundFile => cosmic::task::future(async {
+                let filter = cosmic::dialog::file_chooser::FileFilter::new("Audio files")
+                    .glob("*.ogg")
+                    .glob("*.oga")
+                    .glob("*.opus")
+                    .glob("*.mp3")
+                    .glob("*.wav")
+                    .glob("*.flac");
+                let dialog = cosmic::dialog::file_chooser::open::Dialog::new()
+                    .title("Choose a notification sound")
+                    .filter(filter);
+                match dialog.open_file().await {
+                    Ok(response) => Message::SoundFilePicked(response.url().to_file_path().ok()),
+                    Err(err) => {
+                        tracing::debug!(?err, "sound chooser closed without a file");
+                        Message::SoundFilePicked(None)
+                    }
+                }
+            }),
+            Message::SoundFilePicked(path) => {
+                if let Some(path) = path.filter(|p| p.is_file()) {
+                    self.config.notification_sound_file = path.to_string_lossy().into_owned();
+                    self.config.save(self.config_handler.as_ref());
+                    self.play_chime();
+                }
+                Task::none()
+            }
+            Message::ResetSoundFile => {
+                self.config.notification_sound_file.clear();
+                self.config.save(self.config_handler.as_ref());
+                self.play_chime();
+                Task::none()
+            }
+            Message::NewChat => {
+                self.header_menu_open = false;
+                self.new_chat_query.clear();
+                self.dialog = Some(Dialog::NewChat);
+                widget::text_input::focus(pages::group::new_chat_input_id())
+            }
+            Message::NewChatQuery(query) => {
+                self.new_chat_query = query;
+                Task::none()
+            }
+            Message::StartChat(chat) => {
+                self.dialog = None;
+                self.open_chat(chat)
+            }
+            Message::GifTick => Task::none(),
+            Message::ToggleGif(id) => {
+                // A second click stops it.
+                if self.gif_play.take().is_some_and(|play| play.id == id) {
+                    return Task::none();
+                }
+                let Some(media) = self
+                    .find_message(&id)
+                    .and_then(|m| m.content.media())
+                    .cloned()
+                else {
+                    return Task::none();
+                };
+                self.gif_loading = Some(id.clone());
+                let Some(path) = media::local_file(&media).map(std::path::Path::to_path_buf) else {
+                    // Not downloaded yet: fetch it, then play.
+                    if !self.fetching.contains(&id) {
+                        self.media_errors.remove(&id);
+                        self.request_media(&id);
+                    }
+                    return Task::none();
+                };
+                cosmic::task::future(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        crate::gifplay::decode(
+                            &path,
+                            crate::gifplay::MAX_EDGE,
+                            crate::gifplay::MAX_FRAMES,
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    Message::GifFramesReady(id, result.map(std::sync::Arc::new))
+                })
+            }
+            Message::GifFramesReady(id, result) => {
+                // Only the GIF that was asked for last starts playing.
+                if self.gif_loading.as_ref() != Some(&id) {
+                    return Task::none();
+                }
+                self.gif_loading = None;
+                match result {
+                    Ok(clip) => {
+                        let frames = clip
+                            .frames
+                            .iter()
+                            .map(|rgba| crate::widgets::media::GifFrame {
+                                handle: widget::image::Handle::from_rgba(
+                                    clip.width,
+                                    clip.height,
+                                    rgba.clone(),
+                                ),
+                                width: clip.width,
+                                height: clip.height,
+                            })
+                            .collect();
+                        self.gif_play = Some(GifPlay {
+                            id,
+                            frames,
+                            started: std::time::Instant::now(),
+                        });
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "GIF could not be played");
+                        self.media_errors
+                            .insert(id, format!("Cannot play: {error}"));
+                    }
+                }
+                Task::none()
+            }
+            Message::WindowUnfocused(id) => {
+                if self.core.main_window_id() == Some(id) {
+                    self.send(BackendCommand::SetOnline(false));
+                }
+                Task::none()
+            }
+            Message::ToggleChatSearch => {
+                if self.chat_search.take().is_some() {
+                    self.highlight = None;
+                    return widget::text_input::focus(conversation::composer_id());
+                }
+                if self.conversation.is_none() {
+                    return Task::none();
+                }
+                self.chat_search = Some(ChatSearch::default());
+                widget::text_input::focus(conversation::chat_search_id())
+            }
+            Message::ChatSearchChanged(query) => {
+                let Some(chat) = self.selected.clone() else {
+                    return Task::none();
+                };
+                let hits = match self
+                    .store
+                    .as_ref()
+                    .map(|s| s.search_chat(&chat, &query, 500))
+                {
+                    Some(Ok(found)) => found.into_iter().map(|m| m.id).collect(),
+                    Some(Err(err)) => {
+                        tracing::error!(?err, "search in chat failed");
+                        Vec::new()
+                    }
+                    None => Vec::new(),
+                };
+                let first = hits.first().cloned();
+                self.chat_search = Some(ChatSearch {
+                    query,
+                    hits,
+                    index: 0,
+                });
+                match first {
+                    Some(id) => self.jump_to(id),
+                    None => {
+                        self.highlight = None;
+                        Task::none()
+                    }
+                }
+            }
+            Message::ChatSearchStep(older) => {
+                let Some(search) = self.chat_search.as_mut() else {
+                    return Task::none();
+                };
+                if search.hits.is_empty() {
+                    return Task::none();
+                }
+                let count = search.hits.len();
+                search.index = if older {
+                    (search.index + 1) % count
+                } else {
+                    (search.index + count - 1) % count
+                };
+                let id = search.hits[search.index].clone();
+                self.jump_to(id)
+            }
+            Message::ShowChatInfo => {
+                let Some(conv) = &self.conversation else {
+                    return Task::none();
+                };
+                if conv.chat.kind == wa_core::ChatKind::Group {
+                    return self.update(Message::ShowGroupInfo);
+                }
+                self.show_settings = false;
+                self.show_group_info = false;
+                self.show_contact_info = true;
+                self.set_show_context(true);
+                Task::none()
+            }
+            Message::CloseContactInfo => {
+                self.show_contact_info = false;
+                self.set_show_context(false);
+                Task::none()
+            }
+            Message::StartRecording => {
+                if self.recording.is_some() || self.selected.is_none() {
+                    return Task::none();
+                }
+                match crate::recorder::Recorder::start() {
+                    Ok(recorder) => self.recording = Some(recorder),
+                    Err(err) => {
+                        tracing::warn!(?err, "cannot record");
+                        self.error = Some(format!("Could not record: {err:#}"));
+                    }
+                }
+                Task::none()
+            }
+            Message::RecordTick => {
+                // Stop by itself at the length limit.
+                if self
+                    .recording
+                    .as_ref()
+                    .is_some_and(|r| r.started.elapsed().as_secs() >= crate::recorder::MAX_SECS)
+                {
+                    return self.update(Message::StopRecording(true));
+                }
+                Task::none()
+            }
+            Message::StopRecording(send) => {
+                let Some(recorder) = self.recording.take() else {
+                    return Task::none();
+                };
+                cosmic::task::future(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let dir = if send {
+                            Some(wa_core::paths::media_dir()?)
+                        } else {
+                            None
+                        };
+                        recorder.finish(dir.as_deref())
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow::anyhow!(e)));
+                    Message::RecordingFinished(result.map_err(|e| format!("{e:#}")))
+                })
+            }
+            Message::RecordingFinished(result) => {
+                let note = match result {
+                    Ok(Some(note)) => note,
+                    Ok(None) => return Task::none(),
+                    Err(error) => {
+                        tracing::warn!(%error, "voice message not recorded");
+                        self.error = Some(format!("Voice message not recorded: {error}"));
+                        return Task::none();
+                    }
+                };
+                let Some(chat) = self.selected.clone() else {
+                    return Task::none();
+                };
+                let reply_to = self.replying_to.as_ref().map(|m| m.id.clone());
+                let sent = self.send(BackendCommand::SendMedia {
+                    chat,
+                    local_id: MessageId::new_local(),
+                    path: note.path,
+                    kind: wa_core::MediaKind::Audio,
+                    mime: "audio/ogg; codecs=opus".to_owned(),
+                    file_name: "voice-message.ogg".to_owned(),
+                    size: note.size,
+                    caption: None,
+                    thumbnail: None,
+                    reply_to,
+                    gif: false,
+                    voice_secs: Some(note.secs),
+                });
+                if sent {
+                    self.replying_to = None;
+                    cosmic::iced::widget::scrollable::snap_to(
+                        conversation::scroll_id(),
+                        RelativeOffset {
+                            x: None,
+                            y: Some(0.0),
+                        },
+                    )
+                } else {
+                    self.error = Some("Not connected — voice message not sent".into());
+                    Task::none()
+                }
+            }
+            Message::WindowDrag => self.core.drag(None),
+            Message::WindowMaximize => self.core.toggle_maximize(None),
+            Message::WindowMinimize => self.core.minimize(None),
+            Message::SetFilter(filter) => {
+                self.filter = filter;
+                Task::none()
+            }
+            Message::TogglePinned(chat) => {
+                self.chat_menu_for = None;
+                let pinned = self.chat_extras.get(&chat).is_some_and(|e| e.pinned);
+                if let Some(store) = &self.store
+                    && let Err(err) = store.set_pinned(&chat, !pinned)
+                {
+                    self.store_error("Could not pin the chat", err);
+                }
+                self.reload_chats()
+            }
+            Message::ToggleFavourite(chat) => {
+                self.chat_menu_for = None;
+                let favourite = self.chat_extras.get(&chat).is_some_and(|e| e.favourite);
+                if let Some(store) = &self.store
+                    && let Err(err) = store.set_favourite(&chat, !favourite)
+                {
+                    self.store_error("Could not update favourites", err);
+                }
+                self.reload_chats()
+            }
+            Message::SetGiphyKey(key) => {
+                self.config.giphy_api_key = key.trim().to_owned();
+                self.config.save(self.config_handler.as_ref());
+                self.gifs.results.clear();
+                self.gifs.error = None;
+                Task::none()
+            }
+            Message::CloseEmojiPanel => {
+                self.emoji_panel_open = false;
+                widget::text_input::focus(conversation::composer_id())
+            }
+            Message::InsertEmoji(emoji) => {
+                self.composer.push_str(emoji);
+                Task::none()
+            }
             Message::SendComposer => {
+                self.emoji_panel_open = false;
+                self.gifs.open = false;
                 let text = self.composer.trim().to_owned();
                 let Some(chat) = self.selected.clone() else {
                     return Task::none();
@@ -1765,6 +2459,8 @@ impl Application for App {
                     caption,
                     thumbnail: prepared.thumbnail,
                     reply_to,
+                    gif: prepared.gif,
+                    voice_secs: None,
                 });
                 if sent {
                     self.attachments.pop_front();
@@ -2029,6 +2725,7 @@ impl Application for App {
                 self.header_menu_open = false;
                 self.autostart = desktop::autostart_enabled();
                 self.show_group_info = false;
+                self.show_contact_info = false;
                 self.show_settings = true;
                 self.set_show_context(true);
                 Task::none()
@@ -2124,6 +2821,7 @@ impl Application for App {
                     return Task::none();
                 };
                 self.show_settings = false;
+                self.show_contact_info = false;
                 self.show_group_info = true;
                 self.set_show_context(true);
                 self.send(BackendCommand::GroupInfo { chat });
@@ -2327,12 +3025,18 @@ impl Application for App {
 
     fn view(&self) -> Element<'_, Message> {
         let space = theme::spacing();
+        fn with_header<'a>(page: Element<'a, Message>) -> Element<'a, Message> {
+            widget::column::with_capacity(2)
+                .push(pages::conversation::bare_header())
+                .push(page)
+                .into()
+        }
         let page: Element<'_, Message> = match self.page {
-            Page::Login => pages::login::view(self),
-            Page::Sync => pages::sync::view(self),
+            Page::Login => with_header(pages::login::view(self)),
+            Page::Sync => with_header(pages::sync::view(self)),
             Page::Main => self.main_view(),
         };
-        let mut column = widget::column::with_capacity(3);
+        let mut column = widget::column::with_capacity(4);
         if let Some(error) = &self.error {
             column = column.push(banner(error.clone(), true));
         }
@@ -2344,11 +3048,14 @@ impl Application for App {
         {
             column = column.push(banner(text, false));
         }
-        column
-            .push(page)
-            .spacing(space.space_none)
-            .height(Length::Fill)
-            .into()
+        container(
+            column
+                .push(page)
+                .spacing(space.space_none)
+                .height(Length::Fill),
+        )
+        .class(crate::style::surface(|p| p.window_bg, 0.0))
+        .into()
     }
 
     fn view_window(&self, _id: window::Id) -> Element<'_, Message> {
@@ -2358,6 +3065,87 @@ impl Application for App {
 }
 
 impl App {
+    /// Shows us as online and asks again about the open chat's contact
+    /// (presence is only delivered while we are online).
+    fn go_online(&self) {
+        if !self.send(BackendCommand::SetOnline(true)) {
+            return;
+        }
+        if let Some(chat) = self
+            .selected
+            .as_ref()
+            .filter(|c| !c.is_group() && !c.is_status())
+        {
+            self.send(BackendCommand::WatchPresence { chat: chat.clone() });
+        }
+    }
+
+    /// The line under the name in the conversation header.
+    pub fn status_line(&self, conv: &Conversation) -> String {
+        let id = &conv.chat.id;
+        if self.typing.contains(id) {
+            return "typing…".to_owned();
+        }
+        if conv.chat.kind == wa_core::ChatKind::Group {
+            return "Group".to_owned();
+        }
+        match self.presence.get(id) {
+            Some(p) if p.online => "online".to_owned(),
+            Some(Presence {
+                last_seen: Some(ts),
+                ..
+            }) => pages::chats::last_seen_label(*ts, chrono::Local::now())
+                .unwrap_or_else(|| format!("+{}", id.user())),
+            _ => format!("+{}", id.user()),
+        }
+    }
+
+    /// The main menu button of the chat-list header, with its popup.
+    pub fn main_menu(&self) -> Element<'_, Message> {
+        let space = theme::spacing();
+        let item = |label: &'static str, icon_name: &'static str, message: Message| {
+            button::custom(
+                widget::row::with_capacity(2)
+                    .spacing(space.space_xs)
+                    .align_y(Alignment::Center)
+                    .push(icon::from_name(icon_name).size(16))
+                    .push(widget::text::body(label)),
+            )
+            .width(Length::Fill)
+            .padding([space.space_xxs, space.space_s])
+            .class(theme::Button::MenuItem)
+            .on_press(message)
+        };
+        let toggle = crate::widgets::icon_button(
+            "open-menu-symbolic",
+            crate::tokens::size::ICON_BUTTON,
+            crate::tokens::size::ICON,
+            "Menu",
+            Some(Message::ToggleHeaderMenu),
+        );
+        let mut menu = popover(toggle).position(widget::popover::Position::Bottom);
+        if self.header_menu_open {
+            menu = menu
+                .popup(
+                    container(
+                        widget::column::with_capacity(2)
+                            .push(item("New group", "contact-new-symbolic", Message::NewGroup))
+                            .push(item(
+                                "Settings",
+                                "preferences-system-symbolic",
+                                Message::ShowSettings,
+                            ))
+                            .push(item("Quit", "application-exit-symbolic", Message::Quit)),
+                    )
+                    .padding(space.space_xxs)
+                    .width(Length::Fixed(200.0))
+                    .class(theme::Container::Dropdown),
+                )
+                .on_close(Message::ToggleHeaderMenu);
+        }
+        menu.into()
+    }
+
     fn main_view(&self) -> Element<'_, Message> {
         let condensed = self.core.is_condensed();
         if condensed {
@@ -2367,20 +3155,14 @@ impl App {
                 pages::chats::view(self)
             };
         }
-        // The chat list sits on its own (primary) surface; the window
-        // background shows through the conversation pane.
         let sidebar = container(pages::chats::view(self))
             .width(Length::Fixed(pages::chats::LIST_WIDTH))
-            .height(Length::Fill)
-            .class(theme::Container::custom(|theme| container::Style {
-                background: Some(Background::Color(
-                    theme.cosmic().primary_container_color().into(),
-                )),
-                ..container::Style::default()
-            }));
+            .height(Length::Fill);
+        let divider = container(widget::Space::new().width(1).height(Length::Fill))
+            .class(crate::style::surface(|p| p.selected, 0.0));
         widget::row::with_capacity(3)
             .push(sidebar)
-            .push(widget::divider::vertical::default())
+            .push(divider)
             .push(pages::conversation::view(self))
             .height(Length::Fill)
             .into()
@@ -2597,6 +3379,7 @@ mod tests {
                 file_name: "doc.pdf".into(),
                 size: 4,
                 thumbnail: None,
+                gif: false,
             }),
         });
         assert!(
@@ -2856,15 +3639,32 @@ mod tests {
         let win = window::Id::unique();
         app.core.set_main_window_id(Some(win));
         open_conversation(&mut app, 1, vec![incoming("1@s.whatsapp.net", 5)]);
+        // Focusing also puts us online and asks about the open contact.
+        let drain = |rx: &mut tokio::sync::mpsc::Receiver<BackendCommand>| {
+            let mut got = Vec::new();
+            while let Ok(cmd) = rx.try_recv() {
+                got.push(cmd);
+            }
+            got
+        };
         let _ = app.update(Message::WindowFocused(win));
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(BackendCommand::MarkRead { messages, .. }) if messages == vec![MessageId("m1".into())]
-        ));
+        let sent = drain(&mut rx);
+        assert!(sent.contains(&BackendCommand::SetOnline(true)));
+        assert!(sent.iter().any(|c| matches!(
+            c,
+            BackendCommand::MarkRead { messages, .. } if *messages == vec![MessageId("m1".into())]
+        )));
         assert_eq!(app.chats[0].unread, 0);
         // Nothing left to mark.
         let _ = app.update(Message::WindowFocused(win));
-        assert!(rx.try_recv().is_err());
+        assert!(
+            !drain(&mut rx)
+                .iter()
+                .any(|c| matches!(c, BackendCommand::MarkRead { .. }))
+        );
+        // Looking away takes us offline again.
+        let _ = app.update(Message::WindowUnfocused(win));
+        assert_eq!(drain(&mut rx), vec![BackendCommand::SetOnline(false)]);
     }
 
     #[test]

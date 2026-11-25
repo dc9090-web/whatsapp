@@ -19,10 +19,24 @@ use crate::model::{
     Reaction,
 };
 
+/// What the chat list shows about a chat beyond [`Chat`] itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChatExtra {
+    pub pinned: bool,
+    pub favourite: bool,
+    /// Delivery status of the newest message, when we sent it.
+    pub last_sent_status: Option<MessageStatus>,
+}
+
 const SCHEMA: &str = include_str!("store/schema.sql");
 
 const MESSAGE_COLUMNS: &str =
     "id, chat, sender, sender_name, from_me, ts, content, reply_to, status";
+/// Caps a chat's unread count (?1) at its incoming messages newer than ?2.
+const READ_UP_TO_SQL: &str = "UPDATE chats SET unread = MIN(unread,
+       (SELECT COUNT(*) FROM messages WHERE chat = ?1 AND from_me = 0 AND ts > ?2))
+     WHERE id = ?1";
+
 const CHAT_COLUMNS: &str = "id, kind, name, last_activity, unread, muted, last_preview";
 
 pub struct Store {
@@ -77,6 +91,48 @@ impl Store {
             Ok((ChatId(r.get(0)?), PathBuf::from(r.get::<_, String>(1)?)))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Per-chat details the chat list shows beyond [`Chat`] itself.
+    pub fn chat_extras(&self) -> anyhow::Result<HashMap<ChatId, ChatExtra>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT c.id, c.pinned, c.favourite,
+                    (SELECT m.status FROM messages m
+                      WHERE m.chat = c.id AND m.from_me = 1
+                        AND m.ts = (SELECT MAX(ts) FROM messages WHERE chat = c.id)
+                      LIMIT 1)
+               FROM chats c",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let status: Option<String> = r.get(3)?;
+            Ok((
+                ChatId(r.get(0)?),
+                ChatExtra {
+                    pinned: r.get(1)?,
+                    favourite: r.get(2)?,
+                    last_sent_status: status.and_then(|s| status_from_str(&s).ok()),
+                },
+            ))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Pins the chat to the top of the list, or unpins it.
+    pub fn set_pinned(&self, chat: &ChatId, pinned: bool) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE chats SET pinned = ?2 WHERE id = ?1",
+            params![chat.0, pinned],
+        )?;
+        Ok(())
+    }
+
+    /// Adds the chat to the favourites, or removes it.
+    pub fn set_favourite(&self, chat: &ChatId, favourite: bool) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE chats SET favourite = ?2 WHERE id = ?1",
+            params![chat.0, favourite],
+        )?;
+        Ok(())
     }
 
     /// Inserts or replaces chat metadata. Preserves the existing `unread`,
@@ -204,7 +260,11 @@ impl Store {
                      WHERE id = ?1 AND last_activity <= ?2",
                     params![msg.chat.0, msg.timestamp, msg.content.preview()],
                 )?;
-                if !msg.from_me {
+                if msg.from_me {
+                    // We wrote this (here or on another device), so we have
+                    // seen everything that came before it.
+                    tx.execute(READ_UP_TO_SQL, params![msg.chat.0, msg.timestamp])?;
+                } else {
                     tx.execute(
                         "UPDATE chats SET unread = unread + 1 WHERE id = ?1",
                         params![msg.chat.0],
@@ -250,23 +310,47 @@ impl Store {
     /// Messages whose text, caption or file name contains `query`
     /// (case-insensitively for ASCII), newest first, at most `limit`.
     pub fn search_messages(&self, query: &str, limit: usize) -> anyhow::Result<Vec<Message>> {
+        self.search(None, query, limit)
+    }
+
+    /// [`Store::search_messages`] within one chat.
+    pub fn search_chat(
+        &self,
+        chat: &ChatId,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Message>> {
+        self.search(Some(chat), query, limit)
+    }
+
+    fn search(
+        &self,
+        chat: Option<&ChatId>,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Message>> {
         let query = query.trim();
         if query.is_empty() {
             return Ok(Vec::new());
         }
         let pattern = format!("%{}%", like_escape(query));
+        // ?3 is NULL when every chat is searched.
         let sql = format!(
             "SELECT {MESSAGE_COLUMNS} FROM messages
-             WHERE json_extract(content, '$.Text') LIKE ?1 ESCAPE '\\'
+             WHERE (?3 IS NULL OR chat = ?3)
+               AND (json_extract(content, '$.Text') LIKE ?1 ESCAPE '\\'
                 OR json_extract(content, '$.Image.caption') LIKE ?1 ESCAPE '\\'
                 OR json_extract(content, '$.Video.caption') LIKE ?1 ESCAPE '\\'
                 OR json_extract(content, '$.Document.caption') LIKE ?1 ESCAPE '\\'
-                OR json_extract(content, '$.Document.file_name') LIKE ?1 ESCAPE '\\'
+                OR json_extract(content, '$.Document.file_name') LIKE ?1 ESCAPE '\\')
              ORDER BY ts DESC, rowid DESC LIMIT ?2"
         );
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(params![pattern, limit], row_to_raw_message)?;
+        let rows = stmt.query_map(
+            params![pattern, limit, chat.map(|c| c.0.as_str())],
+            row_to_raw_message,
+        )?;
         let mut found = collect_messages(rows)?;
         // `collect_messages` returns ascending order; search wants newest first.
         found.reverse();
@@ -457,6 +541,13 @@ impl Store {
         Ok(())
     }
 
+    /// The chat was read up to `up_to` (unix ms), e.g. on the phone: only
+    /// incoming messages newer than that stay unread. Never raises the count.
+    pub fn mark_read_up_to(&self, chat: &ChatId, up_to: i64) -> anyhow::Result<()> {
+        self.conn.execute(READ_UP_TO_SQL, params![chat.0, up_to])?;
+        Ok(())
+    }
+
     /// Sum of `unread` over non-muted chats.
     pub fn total_unread(&self) -> anyhow::Result<u32> {
         let total: i64 = self.conn.query_row(
@@ -592,6 +683,16 @@ fn migrate(conn: &rusqlite::Connection) -> anyhow::Result<()> {
         .any(|c| c.is_ok_and(|c| c == "avatar_path"));
     if !has_avatar {
         conn.execute_batch("ALTER TABLE chats ADD COLUMN avatar_path TEXT;")?;
+    }
+    let has_pinned = conn
+        .prepare("PRAGMA table_info(chats)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .any(|c| c.is_ok_and(|c| c == "pinned"));
+    if !has_pinned {
+        conn.execute_batch(
+            "ALTER TABLE chats ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE chats ADD COLUMN favourite INTEGER NOT NULL DEFAULT 0;",
+        )?;
     }
     Ok(())
 }
@@ -1381,6 +1482,79 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].target.0, "new");
         assert_eq!(s.reactions_since(&c, 0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn pins_favourites_and_last_sent_status() {
+        let s = Store::open_in_memory().unwrap();
+        let c = direct();
+        s.upsert_message(&msg(&c, "A", 1000, false, "hello there"))
+            .unwrap();
+        let extra = s.chat_extras().unwrap()[&c];
+        assert_eq!(extra, ChatExtra::default());
+        s.set_pinned(&c, true).unwrap();
+        s.set_favourite(&c, true).unwrap();
+        // Our reply becomes the newest message: its status is reported.
+        s.upsert_message(&msg(&c, "B", 2000, true, "hi")).unwrap();
+        let extra = s.chat_extras().unwrap()[&c];
+        assert!(extra.pinned && extra.favourite);
+        assert_eq!(extra.last_sent_status, Some(MessageStatus::Sent));
+        s.set_pinned(&c, false).unwrap();
+        assert!(!s.chat_extras().unwrap()[&c].pinned);
+    }
+
+    #[test]
+    fn search_in_one_chat_ignores_the_others() {
+        let s = Store::open_in_memory().unwrap();
+        let (a, b) = (direct(), ChatId("999@s.whatsapp.net".into()));
+        s.upsert_message(&msg(&a, "A1", 1000, false, "pizza tonight?"))
+            .unwrap();
+        s.upsert_message(&msg(&a, "A2", 2000, true, "yes, Pizza!"))
+            .unwrap();
+        s.upsert_message(&msg(&b, "B1", 3000, false, "pizza party"))
+            .unwrap();
+        let ids = |found: Vec<Message>| found.into_iter().map(|m| m.id.0).collect::<Vec<_>>();
+        assert_eq!(ids(s.search_chat(&a, "pizza", 50).unwrap()), ["A2", "A1"]);
+        assert_eq!(ids(s.search_chat(&b, "pizza", 50).unwrap()), ["B1"]);
+        assert_eq!(s.search_messages("pizza", 50).unwrap().len(), 3);
+        assert!(s.search_chat(&a, "  ", 50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_elsewhere_keeps_only_newer_messages_unread() {
+        let s = Store::open_in_memory().unwrap();
+        let c = direct();
+        for (id, ts) in [("A", 1000), ("B", 2000), ("C", 3000)] {
+            s.upsert_message(&msg(&c, id, ts, false, "x")).unwrap();
+        }
+        assert_eq!(s.chat(&c).unwrap().unwrap().unread, 3);
+        // Read on the phone up to B: only C is still unread.
+        s.mark_read_up_to(&c, 2000).unwrap();
+        let got = s.chat(&c).unwrap().unwrap();
+        assert_eq!(got.unread, 1);
+        assert_eq!(got.last_activity, 3000, "the chat keeps its place");
+        // A stale marker never raises the count again.
+        s.mark_read_up_to(&c, 1000).unwrap();
+        assert_eq!(s.chat(&c).unwrap().unwrap().unread, 1);
+        s.mark_read_up_to(&c, 3000).unwrap();
+        assert_eq!(s.chat(&c).unwrap().unwrap().unread, 0);
+        // Unknown chats are left alone.
+        s.mark_read_up_to(&ChatId("nobody@s.whatsapp.net".into()), 3000)
+            .unwrap();
+    }
+
+    #[test]
+    fn replying_from_another_device_clears_older_unread() {
+        let s = Store::open_in_memory().unwrap();
+        let c = direct();
+        s.upsert_message(&msg(&c, "A", 1000, false, "x")).unwrap();
+        s.upsert_message(&msg(&c, "B", 2000, false, "y")).unwrap();
+        s.upsert_message(&msg(&c, "D", 4000, false, "later"))
+            .unwrap();
+        // Our own reply, sent between B and D.
+        s.upsert_message(&msg(&c, "C", 3000, true, "reply"))
+            .unwrap();
+        assert_eq!(s.chat(&c).unwrap().unwrap().unread, 1);
     }
 
     #[test]

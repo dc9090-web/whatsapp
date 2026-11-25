@@ -187,6 +187,8 @@ fn rejected(command: BackendCommand) -> Option<BackendEvent> {
         BackendCommand::MarkRead { .. }
         | BackendCommand::DeleteMessage { .. }
         | BackendCommand::DeleteChat { .. }
+        | BackendCommand::SetOnline(_)
+        | BackendCommand::WatchPresence { .. }
         | BackendCommand::Shutdown => None,
     }
 }
@@ -290,6 +292,8 @@ fn apply_command(
             caption,
             thumbnail,
             reply_to,
+            gif,
+            voice_secs,
         } => {
             let media = MediaRef {
                 mime: mime.clone(),
@@ -306,10 +310,11 @@ fn apply_command(
                 MediaKind::Video => MessageContent::Video {
                     caption: caption.clone(),
                     media,
+                    gif: *gif,
                 },
                 MediaKind::Audio => MessageContent::Audio {
-                    voice_note: false,
-                    duration_secs: 0,
+                    voice_note: voice_secs.is_some(),
+                    duration_secs: voice_secs.unwrap_or(0),
                     media,
                 },
                 MediaKind::Document => MessageContent::Document {
@@ -404,6 +409,8 @@ fn apply_command(
         | BackendCommand::RejectCall { .. }
         | BackendCommand::EndCall { .. }
         | BackendCommand::SetCallMuted { .. }
+        | BackendCommand::SetOnline(_)
+        | BackendCommand::WatchPresence { .. }
         | BackendCommand::DeleteMessage {
             for_everyone: true, ..
         }
@@ -419,6 +426,7 @@ fn apply_event(
 ) -> anyhow::Result<()> {
     match event {
         BackendEvent::ChatUpserted(chat) => store.upsert_chat(chat),
+        BackendEvent::ReadElsewhere { chat, up_to } => store.mark_read_up_to(chat, *up_to),
         BackendEvent::Message(message) => store.upsert_message(message).map(drop),
         BackendEvent::MessageStatus {
             chat,
@@ -475,6 +483,8 @@ fn apply_event(
         | BackendEvent::Connection(_)
         | BackendEvent::SyncProgress(_)
         | BackendEvent::SyncDone
+        | BackendEvent::Presence { .. }
+        | BackendEvent::Typing { .. }
         | BackendEvent::MediaFailed { .. }
         | BackendEvent::AvatarMissing { .. }
         | BackendEvent::GroupInviteLink { .. }
@@ -494,6 +504,9 @@ fn event_name(event: &BackendEvent) -> &'static str {
         BackendEvent::SyncProgress(_) => "SyncProgress",
         BackendEvent::SyncDone => "SyncDone",
         BackendEvent::ChatUpserted(_) => "ChatUpserted",
+        BackendEvent::ReadElsewhere { .. } => "ReadElsewhere",
+        BackendEvent::Presence { .. } => "Presence",
+        BackendEvent::Typing { .. } => "Typing",
         BackendEvent::Message(_) => "Message",
         BackendEvent::MessageStatus { .. } => "MessageStatus",
         BackendEvent::MessageSent { .. } => "MessageSent",

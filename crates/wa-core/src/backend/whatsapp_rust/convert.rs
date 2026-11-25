@@ -378,6 +378,7 @@ pub fn content_of(m: &wa::Message) -> Option<(MessageContent, Option<QuotedMessa
         let content = MessageContent::Video {
             caption: non_empty(&v.caption),
             media,
+            gif: v.gif_playback.unwrap_or(false),
         };
         return Some((content, quoted(&v.context_info)));
     }
@@ -677,16 +678,6 @@ pub fn sync_ts_to_ms(t: i64) -> i64 {
     } else {
         secs_to_ms(t)
     }
-}
-
-/// The `ChatUpserted` payload for "read on another device up to `read_up_to`
-/// (ms)": unread 0 at that activity. The store applies it only when no newer
-/// message exists, and never moves `last_activity` back.
-pub fn read_marker(mut snapshot: Chat, read_up_to: i64) -> Chat {
-    snapshot.unread = 0;
-    snapshot.last_activity = read_up_to;
-    snapshot.last_preview = None;
-    snapshot
 }
 
 /// History events in the order they must be applied: every message first,
@@ -1781,8 +1772,8 @@ mod tests {
 
         // Then the user reads it on the phone.
         store
-            .upsert_chat(&read_marker(chat.clone(), 1_700_000_039_000))
-            .expect("read marker");
+            .mark_read_up_to(&chat_id, 1_700_000_039_000)
+            .expect("read elsewhere");
         let after = store.chat(&chat_id).expect("read").expect("chat");
         assert_eq!(after.unread, 0);
         assert_eq!(after.last_activity, chat.last_activity);

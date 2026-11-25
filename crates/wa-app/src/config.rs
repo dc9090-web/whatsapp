@@ -10,21 +10,34 @@ pub const CONFIG_VERSION: u64 = 1;
 const KEY_APPEARANCE: &str = "appearance";
 const KEY_PREVIEWS: &str = "notification_previews";
 const KEY_SOUND: &str = "notification_sound";
+const KEY_GIPHY: &str = "giphy_api_key";
+const KEY_DESIGN: &str = "design";
+/// Bumped when a release should move everyone onto its new default look once.
+const DESIGN: u32 = 2;
+const KEY_VOLUME: &str = "notification_volume";
+const KEY_SOUND_FILE: &str = "notification_sound_file";
 
-/// Colour scheme preference. Dark is the default, as the spec requires.
+/// Colour scheme preference. Tokyo Night (a dark palette) is the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum Appearance {
     #[default]
+    TokyoNight,
     Dark,
     Light,
     System,
 }
 
 impl Appearance {
-    pub const ALL: [Appearance; 3] = [Appearance::Dark, Appearance::Light, Appearance::System];
+    pub const ALL: [Appearance; 4] = [
+        Appearance::TokyoNight,
+        Appearance::Dark,
+        Appearance::Light,
+        Appearance::System,
+    ];
 
     pub const fn label(self) -> &'static str {
         match self {
+            Appearance::TokyoNight => "Tokyo Night",
             Appearance::Dark => "Dark",
             Appearance::Light => "Light",
             Appearance::System => "Match system",
@@ -35,6 +48,7 @@ impl Appearance {
     /// so system mode changes do not override it; System follows the desktop.
     pub fn theme(self) -> cosmic::Theme {
         match self {
+            Appearance::TokyoNight => crate::style::tokyo_night_theme(),
             Appearance::Dark => {
                 let mut theme = cosmic::theme::system_dark();
                 theme.theme_type.prefer_dark(Some(true));
@@ -55,6 +69,12 @@ pub struct Config {
     pub appearance: Appearance,
     pub notification_previews: bool,
     pub notification_sound: bool,
+    /// Loudness of the notification sound, 0–100.
+    pub notification_volume: u8,
+    /// Audio file played instead of the built-in chime; empty for the default.
+    pub notification_sound_file: String,
+    /// The user's GIPHY API key; empty until they add one in Settings.
+    pub giphy_api_key: String,
 }
 
 impl Default for Config {
@@ -63,11 +83,20 @@ impl Default for Config {
             appearance: Appearance::default(),
             notification_previews: true,
             notification_sound: true,
+            notification_volume: 100,
+            notification_sound_file: String::new(),
+            giphy_api_key: String::new(),
         }
     }
 }
 
 impl Config {
+    /// The custom notification sound, if one is set.
+    pub fn sound_file(&self) -> Option<std::path::PathBuf> {
+        (!self.notification_sound_file.is_empty())
+            .then(|| std::path::PathBuf::from(&self.notification_sound_file))
+    }
+
     /// Opens the cosmic-config handle for this app.
     pub fn handler() -> Option<cosmic_config::Config> {
         match cosmic_config::Config::new(APP_ID, CONFIG_VERSION) {
@@ -88,11 +117,31 @@ impl Config {
         if let Ok(appearance) = handler.get::<Appearance>(KEY_APPEARANCE) {
             config.appearance = appearance;
         }
+        // The redesign makes Tokyo Night the default: switch once, then
+        // respect whatever the user picks afterwards.
+        if handler.get::<u32>(KEY_DESIGN).unwrap_or(0) < DESIGN {
+            config.appearance = Appearance::TokyoNight;
+            if let Err(err) = handler.set(KEY_DESIGN, DESIGN) {
+                tracing::error!(?err, "failed to save the design version");
+            }
+            if let Err(err) = handler.set(KEY_APPEARANCE, config.appearance) {
+                tracing::error!(?err, "failed to save appearance");
+            }
+        }
         if let Ok(previews) = handler.get::<bool>(KEY_PREVIEWS) {
             config.notification_previews = previews;
         }
         if let Ok(sound) = handler.get::<bool>(KEY_SOUND) {
             config.notification_sound = sound;
+        }
+        if let Ok(volume) = handler.get::<u8>(KEY_VOLUME) {
+            config.notification_volume = volume.min(100);
+        }
+        if let Ok(file) = handler.get::<String>(KEY_SOUND_FILE) {
+            config.notification_sound_file = file;
+        }
+        if let Ok(key) = handler.get::<String>(KEY_GIPHY) {
+            config.giphy_api_key = key;
         }
         config
     }
@@ -110,6 +159,15 @@ impl Config {
         if let Err(err) = handler.set(KEY_SOUND, self.notification_sound) {
             tracing::error!(?err, "failed to save notification sound");
         }
+        if let Err(err) = handler.set(KEY_VOLUME, self.notification_volume) {
+            tracing::error!(?err, "failed to save notification volume");
+        }
+        if let Err(err) = handler.set(KEY_SOUND_FILE, self.notification_sound_file.clone()) {
+            tracing::error!(?err, "failed to save notification sound file");
+        }
+        if let Err(err) = handler.set(KEY_GIPHY, self.giphy_api_key.clone()) {
+            tracing::error!(?err, "failed to save the GIPHY API key");
+        }
     }
 }
 
@@ -119,8 +177,8 @@ mod tests {
 
     #[test]
     fn appearance_default_is_dark() {
-        assert_eq!(Appearance::default(), Appearance::Dark);
-        assert_eq!(Config::default().appearance, Appearance::Dark);
+        assert_eq!(Appearance::default(), Appearance::TokyoNight);
+        assert_eq!(Config::default().appearance, Appearance::TokyoNight);
         assert!(Config::default().notification_previews);
         assert!(Config::default().notification_sound);
     }

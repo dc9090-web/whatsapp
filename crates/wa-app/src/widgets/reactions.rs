@@ -1,7 +1,7 @@
 //! Reaction chips under a bubble and the quick-reaction set.
 
-use cosmic::iced::Length;
-use cosmic::widget::{self, button};
+use cosmic::iced::{Alignment, Length};
+use cosmic::widget::{self, button, container};
 use cosmic::{Element, theme};
 use wa_core::{MessageId, Reaction};
 
@@ -10,16 +10,9 @@ use crate::app::Message;
 /// The six quick reactions offered in the message menu.
 pub const QUICK_EMOJIS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
-/// The "More…" emoji grid.
-pub const ALL_EMOJIS: &[&str] = &[
-    "👍", "👎", "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "💯", "🔥", "✨", "🎉", "🙏", "👏",
-    "🙌", "👌", "✌️", "🤞", "💪", "🤝", "👀", "🫶", "😀", "😃", "😄", "😁", "😆", "😅", "🤣", "😂",
-    "🙂", "😉", "😊", "😇", "🥰", "😍", "🤩", "😘", "😋", "😛", "😜", "🤪", "🤗", "🤔", "🤨", "😐",
-    "😑", "😶", "🙄", "😏", "😬", "😌", "😔", "😪", "😴", "😷", "🤒", "🤯", "🥳", "😎", "🤓", "😕",
-    "😟", "😮", "😯", "😲", "😳", "🥺", "😦", "😧", "😨", "😰", "😥", "😢", "😭", "😱", "😖", "😣",
-    "😞", "😓", "😩", "😫", "😤", "😡", "😠", "🤬", "💀", "💩", "🤡", "👻", "👽", "🤖", "🎂", "🍕",
-    "☕", "🍺", "🥂", "⚽", "🏆", "🎵", "📌", "✅", "❌", "❓", "❗", "⭐", "🌹", "🌞", "🌈", "🐶",
-];
+/// Height of a reaction chip under a bubble (its diameter while a circle).
+pub const CHIP_SIZE: f32 = 32.0;
+const CHIP_GLYPH: u16 = 20;
 
 /// Groups reactions into `(emoji, count, includes_mine)`, most popular first
 /// (ties broken by emoji for a stable order). Empty emojis are removals and
@@ -49,19 +42,32 @@ pub fn group_reactions(
 /// Chips for each grouped reaction; clicking toggles our own reaction.
 pub fn chips<'a>(target: &MessageId, groups: Vec<(String, usize, bool)>) -> Element<'a, Message> {
     let space = theme::spacing();
-    let mut row = widget::row::with_capacity(groups.len()).spacing(space.space_xxxs);
+    let mut row = widget::row::with_capacity(groups.len()).spacing(space.space_xxs);
     for (emoji, count, mine) in groups {
-        let label = if count > 1 {
-            format!("{emoji} {count}")
-        } else {
-            emoji.clone()
-        };
+        let label = widget::row::with_capacity(2)
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .push(widget::text(emoji.clone()).size(CHIP_GLYPH))
+            .push(
+                widget::text(count.to_string())
+                    .size(crate::tokens::size::TEXT_BODY)
+                    .font(cosmic::font::semibold()),
+            );
+        let (width, pad) = (Length::Shrink, 10);
         let next = if mine { String::new() } else { emoji };
         row = row.push(
-            button::custom(widget::text::caption(label))
-                .padding([2, 8])
-                .class(super::chip_class(mine))
-                .on_press(Message::React(target.clone(), next)),
+            button::custom(
+                container(label)
+                    .height(Length::Fill)
+                    .width(width)
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center),
+            )
+            .width(width)
+            .height(Length::Fixed(CHIP_SIZE))
+            .padding([0, pad])
+            .class(super::chip_class(mine))
+            .on_press(Message::React(target.clone(), next)),
         );
     }
     row.width(Length::Shrink).into()
@@ -107,12 +113,5 @@ mod tests {
     fn empty_input_gives_no_groups() {
         assert!(group_reactions(&[], |_| false).is_empty());
         assert!(group_reactions(&[r("a", "")], |_| false).is_empty());
-    }
-
-    #[test]
-    fn quick_emojis_are_in_full_grid() {
-        for emoji in QUICK_EMOJIS {
-            assert!(ALL_EMOJIS.contains(&emoji), "{emoji} missing from grid");
-        }
     }
 }

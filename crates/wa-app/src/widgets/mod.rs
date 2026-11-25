@@ -1,19 +1,20 @@
 //! Reusable message-view widgets and shared styling helpers.
 
 pub mod bubble;
+pub mod emoji;
 pub mod media;
 pub mod reactions;
 
+use cosmic::iced::widget::text::Wrapping;
 use cosmic::iced::{Alignment, Background, Border, Color, Length};
 use cosmic::widget::{self, button, container};
 use cosmic::{Element, theme};
 
-/// Height of the chat-list and conversation headers, so their hairlines line up.
-pub const HEADER_HEIGHT: f32 = 60.0;
+use crate::style;
+use crate::tokens::{TOKYO_NIGHT, size};
 
-/// WhatsApp green, used for the one primary action: sending.
-pub const SEND_GREEN: Color = Color::from_rgb(0.0, 0.66, 0.52);
-const SEND_GREEN_HOVER: Color = Color::from_rgb(0.02, 0.76, 0.60);
+/// Height of the chat-list and conversation headers, so their hairlines line up.
+pub const HEADER_HEIGHT: f32 = crate::tokens::size::HEADER_HEIGHT;
 
 /// Reply arrow. The Cosmic icon theme has no `mail-reply-sender-symbolic`,
 /// and the fallback theme's renders badly, so the icon is embedded.
@@ -41,32 +42,13 @@ pub fn icon_tint(color: impl Fn(&cosmic::Theme) -> Color + 'static) -> theme::Sv
     })
 }
 
-/// Round send button: green when there is something to send, else quiet.
+/// Round primary action button of the composer: accent-filled when it can
+/// be used, quiet otherwise.
 pub fn send_class(enabled: bool) -> theme::Button {
-    fn style(theme: &cosmic::Theme, enabled: bool, hovered: bool) -> button::Style {
-        let cosmic = theme.cosmic();
-        let mut style = button::Style::new();
-        style.border_radius = 999.0.into();
-        let (bg, fg): (Color, Color) = if !enabled {
-            (
-                cosmic.background(false).component.base.into(),
-                with_alpha(cosmic.on_bg_color().into(), 0.4),
-            )
-        } else if hovered {
-            (SEND_GREEN_HOVER, Color::WHITE)
-        } else {
-            (SEND_GREEN, Color::WHITE)
-        };
-        style.background = Some(Background::Color(bg));
-        style.icon_color = Some(fg);
-        style.text_color = Some(fg);
-        style
-    }
-    theme::Button::Custom {
-        active: Box::new(move |_, t| style(t, enabled, false)),
-        disabled: Box::new(move |t| style(t, false, false)),
-        hovered: Box::new(move |_, t| style(t, enabled, true)),
-        pressed: Box::new(move |_, t| style(t, enabled, false)),
+    if enabled {
+        style::flat_button(|p| p.accent, |p| p.on_accent, 999.0)
+    } else {
+        style::flat_button(|p| p.component, |p| p.text_secondary, 999.0)
     }
 }
 
@@ -85,23 +67,9 @@ pub fn with_alpha(color: Color, alpha: f32) -> Color {
     Color { a: alpha, ..color }
 }
 
-/// Stable, pleasant avatar colour derived from a chat id.
+/// Stable avatar colour derived from a chat id.
 pub fn avatar_color(seed: &str) -> Color {
-    const PALETTE: [(u8, u8, u8); 8] = [
-        (0x2e, 0x9e, 0x6e),
-        (0x3b, 0x82, 0xc4),
-        (0x8e, 0x5c, 0xc8),
-        (0xd0, 0x6a, 0x3a),
-        (0xc2, 0x4a, 0x7a),
-        (0x2f, 0x9a, 0xa8),
-        (0xb0, 0x8a, 0x22),
-        (0x5a, 0x6f, 0xd6),
-    ];
-    let hash = seed
-        .bytes()
-        .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)));
-    let (r, g, b) = PALETTE[(hash as usize) % PALETTE.len()];
-    Color::from_rgb8(r, g, b)
+    style::color(TOKYO_NIGHT.avatars[crate::tokens::avatar_index(seed)])
 }
 
 /// Up to two initials from a display name ("Ana Silva" → "AS", "+1 555" → "1").
@@ -126,6 +94,11 @@ fn embedded_icon(svg: &'static [u8]) -> widget::icon::Handle {
     handle
 }
 
+/// Side-panel icon for "details"; not in the COSMIC icon theme.
+pub fn details_icon() -> widget::icon::Handle {
+    embedded_icon(include_bytes!("../../assets/sidebar-right-symbolic.svg"))
+}
+
 /// Download arrow for "Save to Downloads".
 pub fn download_icon() -> widget::icon::Handle {
     embedded_icon(include_bytes!("../../assets/download-symbolic.svg"))
@@ -148,9 +121,9 @@ pub fn avatar<'a, M: 'a>(
     }
     let bg = avatar_color(seed);
     let label = widget::text(initials(name))
-        .size(size * 0.4)
-        .font(cosmic::font::semibold())
-        .class(theme::Text::Color(Color::WHITE));
+        .size(size * 0.34)
+        .font(cosmic::font::bold())
+        .class(theme::Text::Custom(style::text_on_avatar));
     container(label)
         .width(Length::Fixed(size))
         .height(Length::Fixed(size))
@@ -167,97 +140,161 @@ pub fn avatar<'a, M: 'a>(
         .into()
 }
 
-/// Accent-filled pill with a count (unread badge).
+/// Height of the unread badge (and its least width).
+pub const COUNT_PILL_SIZE: f32 = size::BADGE;
+
+/// Unread badge: accent-filled (quiet for muted chats), capped at "99+".
 pub fn count_pill<'a, M: 'a>(count: u32, muted: bool) -> Element<'a, M> {
-    let label = if count > 999 {
-        "999+".to_owned()
+    let label = crate::tokens::unread_label(count).unwrap_or_default();
+    // A circle for one digit; a pill once the count needs the room.
+    let (width, pad) = if label.len() <= 1 {
+        (Length::Fixed(COUNT_PILL_SIZE), 0)
     } else {
-        count.to_string()
+        (Length::Shrink, 6)
     };
-    container(widget::text::caption_heading(label))
-        .padding([1, 7])
-        .align_x(Alignment::Center)
-        .class(theme::Container::custom(move |theme| {
-            let cosmic = theme.cosmic();
-            let (bg, fg) = if muted {
-                (cosmic.palette.neutral_5.into(), cosmic.on_bg_color().into())
+    container(
+        widget::text(label)
+            .size(size::TEXT_META)
+            .font(cosmic::font::bold())
+            .wrapping(Wrapping::None)
+            .class(theme::Text::Custom(if muted {
+                style::text
             } else {
-                (
-                    cosmic.accent_color().into(),
-                    cosmic.on_accent_color().into(),
-                )
-            };
-            container::Style {
-                background: Some(Background::Color(bg)),
-                text_color: Some(fg),
-                border: Border {
-                    radius: 10.0.into(),
-                    ..Border::default()
-                },
-                ..container::Style::default()
-            }
-        }))
+                style::text_on_accent
+            })),
+    )
+    .width(width)
+    .height(Length::Fixed(COUNT_PILL_SIZE))
+    .padding([0, pad])
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .class(if muted {
+        style::outlined(
+            |p| Some(p.selected),
+            |p| p.key_border,
+            1.0,
+            COUNT_PILL_SIZE / 2.0,
+        )
+    } else {
+        style::surface(|p| p.accent, COUNT_PILL_SIZE / 2.0)
+    })
+    .into()
+}
+
+/// Flat list-row button: transparent, `selected` fill when hovered or current.
+pub fn list_row_class(selected: bool) -> theme::Button {
+    style::ghost_button(selected, size::ROW_RADIUS)
+}
+
+/// Reaction chip under a bubble: tint fill with a window-coloured rim, and an
+/// accent rim when it includes our own reaction.
+pub fn chip_class(highlight: bool) -> theme::Button {
+    fn chip(theme: &cosmic::Theme, highlight: bool, hovered: bool) -> button::Style {
+        let p = style::palette(theme);
+        let mut s = button::Style::new();
+        s.border_radius = size::REACTION_RADIUS.into();
+        let fill = if hovered {
+            crate::tokens::Rgb::hex(0xffffff).mix_over(p.tint, 8)
+        } else {
+            p.tint
+        };
+        s.background = Some(Background::Color(style::color(fill)));
+        s.border_width = 2.0;
+        s.border_color = style::color(if highlight { p.accent } else { p.window_bg });
+        s.text_color = Some(style::color(p.text));
+        s
+    }
+    theme::Button::Custom {
+        active: Box::new(move |_, t| chip(t, highlight, false)),
+        disabled: Box::new(move |t| chip(t, highlight, false)),
+        hovered: Box::new(move |_, t| chip(t, highlight, true)),
+        pressed: Box::new(move |_, t| chip(t, highlight, true)),
+    }
+}
+
+/// A square icon-only button (`px` across) with a tooltip naming it.
+pub fn icon_button<'a, M: Clone + 'static>(
+    icon_name: &'static str,
+    px: f32,
+    icon_px: f32,
+    label: &'static str,
+    on_press: Option<M>,
+) -> Element<'a, M> {
+    icon_button_handle(
+        widget::icon::from_name(icon_name).handle(),
+        px,
+        icon_px,
+        label,
+        on_press,
+    )
+}
+
+/// [`icon_button`] for an icon that is not looked up by name.
+pub fn icon_button_handle<'a, M: Clone + 'static>(
+    handle: widget::icon::Handle,
+    px: f32,
+    icon_px: f32,
+    label: &'static str,
+    on_press: Option<M>,
+) -> Element<'a, M> {
+    widget::tooltip(
+        button::custom(
+            container(widget::icon::icon(handle).size(icon_px as u16))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center),
+        )
+        .width(Length::Fixed(px))
+        .height(Length::Fixed(px))
+        .padding(0)
+        .class(style::ghost_button(false, px / 2.0))
+        .on_press_maybe(on_press),
+        widget::text::caption(label),
+        widget::tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+/// Minimise, maximise and close, for the header that replaces the title bar.
+pub fn window_controls<'a>() -> Element<'a, crate::app::Message> {
+    use crate::app::Message;
+    let control = |name: &'static str, label: &'static str, message: Message| {
+        icon_button(
+            name,
+            size::WINDOW_BUTTON,
+            size::WINDOW_ICON,
+            label,
+            Some(message),
+        )
+    };
+    widget::row::with_capacity(3)
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .push(control(
+            "window-minimize-symbolic",
+            "Minimise",
+            Message::WindowMinimize,
+        ))
+        .push(control(
+            "window-maximize-symbolic",
+            "Maximise",
+            Message::WindowMaximize,
+        ))
+        .push(control("window-close-symbolic", "Close", Message::Quit))
         .into()
 }
 
-/// Flat list-row button: transparent, hover tint, accent-tinted when selected.
-pub fn list_row_class(selected: bool) -> theme::Button {
-    fn style(theme: &cosmic::Theme, selected: bool, hovered: bool) -> button::Style {
-        let cosmic = theme.cosmic();
-        let mut style = button::Style::new();
-        style.border_radius = cosmic.corner_radii.radius_m.into();
-        style.background = if selected {
-            Some(Background::Color(with_alpha(
-                cosmic.accent_color().into(),
-                0.18,
-            )))
-        } else if hovered {
-            Some(Background::Color(with_alpha(
-                cosmic.on_bg_color().into(),
-                0.06,
-            )))
-        } else {
-            None
-        };
-        style.text_color = Some(cosmic.on_bg_color().into());
-        style.icon_color = Some(cosmic.on_bg_color().into());
-        style
-    }
-    theme::Button::Custom {
-        active: Box::new(move |_, t| style(t, selected, false)),
-        disabled: Box::new(move |t| style(t, selected, false)),
-        hovered: Box::new(move |_, t| style(t, selected, true)),
-        pressed: Box::new(move |_, t| style(t, true, true)),
-    }
-}
-
-/// Small rounded "chip" button (reactions, quick emojis).
-pub fn chip_class(highlight: bool) -> theme::Button {
-    fn style(theme: &cosmic::Theme, highlight: bool, hovered: bool) -> button::Style {
-        let cosmic = theme.cosmic();
-        let mut style = button::Style::new();
-        style.border_radius = cosmic.corner_radii.radius_xl.into();
-        let base: Color = if hovered {
-            cosmic.background(false).component.hover.into()
-        } else {
-            cosmic.background(false).component.base.into()
-        };
-        style.background = Some(Background::Color(base));
-        style.border_width = 1.0;
-        style.border_color = if highlight {
-            cosmic.accent_color().into()
-        } else {
-            cosmic.background(false).component.divider.into()
-        };
-        style.text_color = Some(cosmic.on_bg_color().into());
-        style
-    }
-    theme::Button::Custom {
-        active: Box::new(move |_, t| style(t, highlight, false)),
-        disabled: Box::new(move |t| style(t, highlight, false)),
-        hovered: Box::new(move |_, t| style(t, highlight, true)),
-        pressed: Box::new(move |_, t| style(t, highlight, true)),
-    }
+/// A pane header that doubles as the window's drag area (double-click
+/// maximises), since the title bar is gone.
+pub fn drag_area<'a>(
+    content: impl Into<Element<'a, crate::app::Message>>,
+) -> Element<'a, crate::app::Message> {
+    use crate::app::Message;
+    widget::mouse_area(content)
+        .on_press(Message::WindowDrag)
+        .on_double_press(Message::WindowMaximize)
+        .into()
 }
 
 /// Text style with a fixed colour.
@@ -275,13 +312,12 @@ pub fn error_text(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
 
 /// Muted secondary text colour for captions/timestamps.
 pub fn dim_text(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
-    let on: Color = theme.cosmic().on_bg_color().into();
-    crate::widgets::text_style(with_alpha(on, 0.62))
+    style::text_secondary(theme)
 }
 
 /// Accent-coloured text (sender names, links).
 pub fn accent_text(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
-    crate::widgets::text_style(theme.cosmic().accent_text_color().into())
+    style::text_accent(theme)
 }
 
 /// Human-readable byte size.

@@ -20,6 +20,8 @@ pub struct Prepared {
     pub file_name: String,
     pub size: u64,
     pub thumbnail: Option<Vec<u8>>,
+    /// A clip to send as a looping GIF.
+    pub gif: bool,
 }
 
 /// Message kind and MIME type from the file extension.
@@ -72,13 +74,17 @@ pub fn prepare(path: &Path, out_dir: &Path) -> Result<Prepared, String> {
         return prepare_image(path, out_dir, &file_name, mime == "image/jpeg");
     }
     let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let gif = crate::giphy::is_gif_clip(path);
     Ok(Prepared {
         path: path.to_path_buf(),
         kind,
         mime: mime.to_owned(),
         file_name,
         size,
-        thumbnail: None,
+        thumbnail: gif
+            .then(|| std::fs::read(crate::giphy::thumbnail_path(path)).ok())
+            .flatten(),
+        gif,
     })
 }
 
@@ -100,6 +106,7 @@ fn prepare_image(
             file_name: file_name.to_owned(),
             size,
             thumbnail: Some(thumbnail),
+            gif: false,
         });
     }
     let scaled = if fits {
@@ -126,6 +133,7 @@ fn prepare_image(
         file_name: format!("{stem}.jpg"),
         size: bytes.len() as u64,
         thumbnail: Some(thumbnail),
+        gif: false,
     })
 }
 

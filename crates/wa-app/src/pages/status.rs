@@ -87,12 +87,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
             button::icon(icon::from_name("go-previous-symbolic")).on_press(Message::CloseChat),
         );
     }
-    header_row = header_row.push(widget::text::heading("Status").width(Length::Fill));
-    let header = container(header_row)
-        .height(Length::Fixed(widgets::HEADER_HEIGHT))
-        .padding([0, space.space_m])
-        .align_y(Alignment::Center)
-        .width(Length::Fill);
+    header_row = header_row
+        .push(widget::text::heading("Status").width(Length::Fill))
+        .push(widgets::window_controls());
+    let header = widgets::drag_area(
+        container(header_row)
+            .height(Length::Fixed(widgets::HEADER_HEIGHT))
+            .padding([0, 8, 0, 20])
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
+    );
 
     // My status: post box plus what I have shared in the last day.
     let can_post = (!app.composer.trim().is_empty() || !app.attachments.is_empty())
@@ -234,6 +238,8 @@ fn item<'a>(app: &'a App, m: &'a wa_core::Message) -> Element<'a, Message> {
                     playing: app.playing.as_ref() == Some(&m.id) && !app.audio_paused,
                     outgoing: m.from_me,
                     saved: app.saved_media.get(&m.id).map(PathBuf::as_path),
+                    gif_frame: None,
+                    gif_loading: false,
                 },
             )
             .unwrap_or_else(|| widget::text::body(content.preview()).into())

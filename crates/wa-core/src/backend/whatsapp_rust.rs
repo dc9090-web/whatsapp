@@ -468,6 +468,7 @@ async fn reject(shared: &Shared, cmd: BackendCommand, why: &str) {
         BackendCommand::MarkRead { .. } => {
             tracing::debug!("read receipts skipped: {why}");
         }
+        BackendCommand::SetOnline(_) | BackendCommand::WatchPresence { .. } => {}
         BackendCommand::DeleteMessage {
             for_everyone: true, ..
         } => {
@@ -877,6 +878,8 @@ async fn handle_command(shared: &Arc<Shared>, client: &Arc<Client>, cmd: Backend
             caption,
             thumbnail,
             reply_to,
+            gif,
+            voice_secs,
             ..
         } => {
             let shared = Arc::clone(shared);
@@ -890,6 +893,8 @@ async fn handle_command(shared: &Arc<Shared>, client: &Arc<Client>, cmd: Backend
                     caption,
                     thumbnail,
                     reply_to,
+                    gif,
+                    voice_secs,
                 };
                 let ev = match send_media(&shared, &client, &chat, outgoing).await {
                     Ok(id) => BackendEvent::MessageSent {
@@ -985,6 +990,25 @@ async fn handle_command(shared: &Arc<Shared>, client: &Arc<Client>, cmd: Backend
                 }
             });
         }
+        BackendCommand::SetOnline(online) => {
+            let presence = client.presence();
+            let result = if online {
+                presence.set_available().await
+            } else {
+                presence.set_unavailable().await
+            };
+            if let Err(e) = result {
+                tracing::debug!("presence not sent: {e}");
+            }
+        }
+        BackendCommand::WatchPresence { chat } => match parse_jid(&chat) {
+            Ok(jid) => {
+                if let Err(e) = client.presence().subscribe(jid).await {
+                    tracing::debug!("presence subscription failed: {e}");
+                }
+            }
+            Err(e) => tracing::debug!("{e:#}"),
+        },
         BackendCommand::GroupInfo { chat } => {
             let ev = match group_info(shared, client, &chat).await {
                 Ok(info) => BackendEvent::GroupInfo(info),
@@ -1278,6 +1302,8 @@ struct OutgoingMedia {
     caption: Option<String>,
     thumbnail: Option<Vec<u8>>,
     reply_to: Option<MessageId>,
+    gif: bool,
+    voice_secs: Option<u32>,
 }
 
 /// Uploads the file (encrypted, to WhatsApp's CDN) and sends the matching
@@ -1330,6 +1356,7 @@ async fn send_media(
                 caption: media.caption,
                 mimetype: Some(media.mime),
                 jpeg_thumbnail: media.thumbnail,
+                gif_playback: media.gif.then_some(true),
                 context_info,
                 ..Default::default()
             },
@@ -1338,7 +1365,8 @@ async fn send_media(
             upload,
             AudioOptions {
                 mimetype: Some(media.mime),
-                ptt: Some(false),
+                ptt: Some(media.voice_secs.is_some()),
+                duration_seconds: media.voice_secs,
                 context_info,
                 ..Default::default()
             },
@@ -1704,16 +1732,17 @@ impl EventPump {
                 }
                 let chat = convert::chat_id_from_source(&r.source, &self.shared.lids());
                 if r.r#type == ReceiptType::ReadSelf {
-                    // We read these on another device (the phone).
+                    // We read these on another device (the phone). When none
+                    // of the messages is one we know, fall back to the moment
+                    // of reading: everything up to then has been seen.
                     let read_up_to = r
                         .message_ids
                         .iter()
                         .filter_map(|id| self.shared.key(&chat, id))
                         .map(|rec| rec.timestamp)
-                        .max();
-                    if let Some(ts) = read_up_to {
-                        self.read_elsewhere(&chat, ts).await;
-                    }
+                        .max()
+                        .unwrap_or_else(|| r.timestamp.timestamp_millis());
+                    self.read_elsewhere(&chat, read_up_to).await;
                     return;
                 }
                 let Some(status) = convert::receipt_status_in(&r.r#type, group) else {
@@ -1814,6 +1843,30 @@ impl EventPump {
                 let chat = convert::chat_id_for(&u.jid, None, &self.shared.lids());
                 self.read_elsewhere(&chat, convert::sync_ts_to_ms(ts)).await;
             }
+            Event::Presence(p) => {
+                if !p.from.is_group() {
+                    self.learn_lid(&p.from).await;
+                }
+                let chat = convert::chat_id_for(&p.from, None, &self.shared.lids());
+                self.emit(BackendEvent::Presence {
+                    chat,
+                    online: !p.unavailable,
+                    last_seen: p.last_seen.map(|t| t.timestamp_millis()),
+                })
+                .await;
+            }
+            Event::ChatPresence(c) => {
+                if !c.source.is_group {
+                    self.learn_lid(&c.source.chat).await;
+                }
+                let chat = convert::chat_id_from_source(&c.source, &self.shared.lids());
+                self.emit(BackendEvent::Typing {
+                    chat,
+                    active: c.state
+                        == whatsapp_rust::wacore::types::presence::ChatPresence::Composing,
+                })
+                .await;
+            }
             Event::OfflineSyncCompleted(c) => {
                 tracing::debug!("offline sync completed ({} items)", c.count);
             }
@@ -1836,18 +1889,14 @@ impl EventPump {
         }
     }
 
-    /// The chat was read on another device up to `read_up_to` (ms): clear
-    /// its unread count unless newer messages arrived since.
+    /// The chat was read on another device up to `read_up_to` (ms): only
+    /// messages that arrived after that stay unread.
     async fn read_elsewhere(&self, chat: &ChatId, read_up_to: i64) {
-        let known = lock(&self.shared.index)
-            .chat_meta(chat)
-            .map(|m| m.known)
-            .unwrap_or(false);
-        if !known {
-            return;
-        }
-        let marker = convert::read_marker(self.shared.chat_snapshot(chat), read_up_to);
-        self.emit(BackendEvent::ChatUpserted(marker)).await;
+        self.emit(BackendEvent::ReadElsewhere {
+            chat: chat.clone(),
+            up_to: read_up_to,
+        })
+        .await;
     }
 
     /// Announces every group we participate in, with its subject.

@@ -76,6 +76,17 @@ pub enum BackendCommand {
         caption: Option<String>,
         thumbnail: Option<Vec<u8>>,
         reply_to: Option<MessageId>,
+        /// A video that should loop silently like a GIF.
+        gif: bool,
+        /// Audio recorded as a voice message, with its length in seconds.
+        voice_secs: Option<u32>,
+    },
+    /// Show us as online (`true`) or away. Others' online state and last
+    /// seen are only delivered while we are online.
+    SetOnline(bool),
+    /// Ask for a contact's online state / last seen (answered by `Presence`).
+    WatchPresence {
+        chat: ChatId,
     },
     /// Fetch a group's metadata and members (answered by `GroupInfo`).
     GroupInfo {
@@ -138,6 +149,24 @@ pub enum BackendEvent {
     SyncProgress(f32),
     SyncDone,
     ChatUpserted(Chat),
+    /// A contact came online or went away; `last_seen` is unix ms when the
+    /// contact shares it.
+    Presence {
+        chat: ChatId,
+        online: bool,
+        last_seen: Option<i64>,
+    },
+    /// Somebody started (`active`) or stopped typing in the chat.
+    Typing {
+        chat: ChatId,
+        active: bool,
+    },
+    /// The chat was read on another of our devices up to `up_to` (unix ms):
+    /// only incoming messages newer than that still count as unread.
+    ReadElsewhere {
+        chat: ChatId,
+        up_to: i64,
+    },
     Message(Message),
     MessageStatus {
         chat: ChatId,

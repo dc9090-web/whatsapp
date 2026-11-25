@@ -20,6 +20,8 @@ pub const SAMPLE_JPEG: &[u8] = include_bytes!("../../assets/sample.jpg");
 pub const SAMPLE_STICKER_WEBP: &[u8] = include_bytes!("../../assets/sticker.webp");
 /// A 3 second, quiet 440 Hz OGG/Opus clip (mono, 48 kHz), served for demo voice notes.
 pub const SAMPLE_OGG_OPUS: &[u8] = include_bytes!("../../assets/sample.ogg");
+/// A two second 320×180 silent MP4 test pattern, served for the demo GIF.
+pub const SAMPLE_MP4: &[u8] = include_bytes!("../../assets/sample.mp4");
 /// A one-page PDF, served for demo documents.
 pub const SAMPLE_PDF: &[u8] = include_bytes!("../../assets/sample.pdf");
 /// Two 160×160 JPEG profile pictures, served for some demo chats.
@@ -352,7 +354,18 @@ impl WhatsAppBackend for FakeBackend {
                         return Ok(());
                     }
                 }
-                BackendCommand::SetCallMuted { .. } => {}
+                BackendCommand::SetCallMuted { .. } | BackendCommand::SetOnline(_) => {}
+                BackendCommand::WatchPresence { chat } => {
+                    // Demo contacts were all "last seen" 25 minutes ago.
+                    let presence = BackendEvent::Presence {
+                        chat,
+                        online: false,
+                        last_seen: Some(now_ms() - 25 * 60_000),
+                    };
+                    if events.send(presence).await.is_err() {
+                        return Ok(());
+                    }
+                }
                 BackendCommand::DeleteMessage { .. }
                 | BackendCommand::DeleteChat { .. }
                 | BackendCommand::MarkRead { .. } => {}
@@ -460,6 +473,7 @@ fn sample_for(media: &MediaRef) -> Option<(&'static [u8], &'static str)> {
         Some("sticker.webp") => return Some((SAMPLE_STICKER_WEBP, "webp")),
         Some("sample.ogg") => return Some((SAMPLE_OGG_OPUS, "ogg")),
         Some("sample.pdf") => return Some((SAMPLE_PDF, "pdf")),
+        Some("sample.mp4") => return Some((SAMPLE_MP4, "mp4")),
         Some(_) => return None,
         None => {}
     }
@@ -777,6 +791,15 @@ fn demo_script(now: i64) -> Vec<BackendEvent> {
     mum.react(&thanks, MUM.jid, "🥰", now - 5 * HOUR + 12 * MIN);
     mum.add(
         Who::Them(&MUM),
+        now - 5 * HOUR + 15 * MIN,
+        MessageContent::Video {
+            caption: None,
+            media: media("video/mp4", SAMPLE_MP4, "sample.mp4", Some(SAMPLE_JPEG)),
+            gif: true,
+        },
+    );
+    mum.add(
+        Who::Them(&MUM),
         now - HOUR,
         MessageContent::Audio {
             voice_note: true,
@@ -891,6 +914,7 @@ fn demo_script(now: i64) -> Vec<BackendEvent> {
                 local_path: None,
                 download_token: format!("{TOKEN_PREFIX}video.mp4").into_bytes(),
             },
+            gif: false,
         },
     );
     family.text(
@@ -904,6 +928,30 @@ fn demo_script(now: i64) -> Vec<BackendEvent> {
         "Happy birthday sis! 🥳",
     );
     chats.push(family);
+
+    // Long names and previews, to exercise truncation in the chat list.
+    let mut reunion = DemoChat::new(
+        "120363025550000004@g.us",
+        "Class of 2012 Reunion Planning Committee 🎓",
+        "H8",
+    );
+    reunion.text(
+        Who::Them(&PRIYA),
+        now - 40 * MIN,
+        "Has anyone heard back from the venue about the deposit? They said they'd confirm by Friday and I still have nothing",
+    );
+    reunion.unread = 128;
+    chats.push(reunion);
+
+    let mut marco =
+        DemoChat::new(MARCO.jid, "Marco Rossi (Landlord, Flat 4B Via Roma)", "I9").muted();
+    marco.text(
+        Who::Them(&MARCO),
+        now - 3 * HOUR,
+        "The plumber will come by on Thursday morning between nine and eleven, please make sure somebody is home",
+    );
+    marco.unread = 12;
+    chats.push(marco);
 
     let total = chats.len();
     let mut out = vec![
@@ -930,6 +978,7 @@ mod tests {
             (SAMPLE_STICKER_WEBP, b"RIFF"),
             (SAMPLE_OGG_OPUS, b"OggS"),
             (SAMPLE_PDF, b"%PDF"),
+            (SAMPLE_MP4, b"\0\0\0"),
         ] {
             assert!(bytes.len() < 50 * 1024);
             assert!(bytes.starts_with(magic));
@@ -978,7 +1027,7 @@ mod tests {
             if let BackendEvent::Message(m) = e
                 && let Some(media) = m.content.media()
             {
-                let expect = !matches!(m.content, MessageContent::Video { .. });
+                let expect = !matches!(m.content, MessageContent::Video { gif: false, .. });
                 assert_eq!(sample_for(media).is_some(), expect, "{:?}", m.content);
                 if let Some((bytes, _)) = sample_for(media) {
                     assert_eq!(bytes.len() as u64, media.size);

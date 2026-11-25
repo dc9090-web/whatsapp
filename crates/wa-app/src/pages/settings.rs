@@ -8,7 +8,8 @@ use crate::app::{App, Message};
 use crate::config::Appearance;
 use crate::widgets;
 
-const APPEARANCE_LABELS: [&str; 3] = [
+const APPEARANCE_LABELS: [&str; 4] = [
+    Appearance::TokyoNight.label(),
     Appearance::Dark.label(),
     Appearance::Light.label(),
     Appearance::System.label(),
@@ -27,6 +28,25 @@ pub fn view(app: &App) -> Element<'_, Message> {
         }),
     ));
 
+    let custom_sound = app.config.sound_file();
+    let sound_name = match &custom_sound {
+        Some(path) => path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Custom sound".to_owned()),
+        None => "Default chime".to_owned(),
+    };
+    let sound_buttons = widget::row::with_capacity(3)
+        .spacing(space.space_xxs)
+        .align_y(Alignment::Center)
+        .push(button::standard("Test").on_press(Message::TestSound))
+        .push(button::standard("Choose…").on_press(Message::PickSoundFile))
+        .push_maybe(
+            custom_sound
+                .is_some()
+                .then(|| button::standard("Reset").on_press(Message::ResetSoundFile)),
+        );
+
     let notifications = settings::section()
         .title("Notifications")
         .add(
@@ -38,7 +58,36 @@ pub fn view(app: &App) -> Element<'_, Message> {
             settings::item::builder("Notification sound")
                 .description("Play a chime when a message arrives")
                 .toggler(app.config.notification_sound, Message::SetSound),
+        )
+        .add(
+            settings::item::builder("Volume")
+                .description(format!("{}%", app.config.notification_volume))
+                .control(
+                    widget::slider(
+                        0..=100u8,
+                        app.config.notification_volume,
+                        Message::SetSoundVolume,
+                    )
+                    .step(5u8)
+                    .on_release(Message::TestSound)
+                    .width(Length::Fixed(180.0)),
+                ),
+        )
+        .add(
+            settings::item::builder("Sound")
+                .description(sound_name)
+                .control(sound_buttons),
         );
+
+    let gifs = settings::section().title("GIFs").add(
+        settings::item::builder("GIPHY API key")
+            .description("Needed to search GIFs. Free from developers.giphy.com")
+            .control(
+                widget::text_input("Paste your key", app.config.giphy_api_key.as_str())
+                    .on_input(Message::SetGiphyKey)
+                    .width(Length::Fixed(220.0)),
+            ),
+    );
 
     let startup = settings::section().title("Startup");
     let startup = match app.autostart {
@@ -76,6 +125,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     settings::view_column(vec![
         appearance.into(),
         notifications.into(),
+        gifs.into(),
         startup.into(),
         account.into(),
         about.into(),

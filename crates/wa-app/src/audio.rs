@@ -35,8 +35,61 @@ enum Command {
     Pause,
     Resume,
     Stop,
-    /// Play the new-message chime (on its own channel, over any voice note).
-    Chime,
+    /// Play the new-message sound (on its own channel, over any voice note):
+    /// the user's `file`, or the built-in chime when `None` or unreadable.
+    Chime {
+        volume: f32,
+        file: Option<PathBuf>,
+    },
+}
+
+/// Decoded audio ready to play.
+struct Sound {
+    channels: NonZero<u16>,
+    rate: NonZero<u32>,
+    samples: Vec<f32>,
+}
+
+/// Longest notification sound we play; longer files are cut off.
+const MAX_SOUND_SECS: usize = 10;
+
+/// The built-in chime.
+fn default_chime() -> Option<Sound> {
+    let (channels, samples) = decode_ogg_opus(std::io::Cursor::new(CHIME)).ok()?;
+    Some(Sound {
+        channels: NonZero::new(channels)?,
+        rate: NonZero::new(OPUS_RATE)?,
+        samples,
+    })
+}
+
+/// Decodes a notification sound file: Ogg/Opus with libopus, anything else
+/// (MP3, WAV, Ogg/Vorbis, FLAC) with rodio's decoders.
+fn load_sound(path: &Path) -> anyhow::Result<Sound> {
+    use rodio::Source;
+    let open = || std::fs::File::open(path).context("cannot open the file");
+    if let Ok((channels, mut samples)) = decode_ogg_opus(std::io::BufReader::new(open()?)) {
+        let channels = NonZero::new(channels).context("no audio channels")?;
+        samples.truncate(MAX_SOUND_SECS * OPUS_RATE as usize * usize::from(channels.get()));
+        return Ok(Sound {
+            channels,
+            rate: NonZero::new(OPUS_RATE).context("bad sample rate")?,
+            samples,
+        });
+    }
+    let decoder = rodio::Decoder::new(std::io::BufReader::new(open()?))
+        .context("not a supported audio file")?;
+    let (channels, rate) = (decoder.channels(), decoder.sample_rate());
+    let limit = MAX_SOUND_SECS * rate.get() as usize * usize::from(channels.get());
+    let samples: Vec<f32> = decoder.take(limit).collect();
+    if samples.is_empty() {
+        bail!("the file has no audio");
+    }
+    Ok(Sound {
+        channels,
+        rate,
+        samples,
+    })
 }
 
 /// The new-message sound, Ogg/Opus, ~0.5 s.
@@ -69,8 +122,10 @@ impl AudioHandle {
         self.send(Command::Stop);
     }
 
-    pub fn chime(&self) {
-        self.send(Command::Chime);
+    /// Plays the notification sound at `volume` (0.0–1.0); `file` replaces
+    /// the built-in chime.
+    pub fn chime(&self, volume: f32, file: Option<PathBuf>) {
+        self.send(Command::Chime { volume, file });
     }
 
     fn send(&self, cmd: Command) {
@@ -120,12 +175,13 @@ fn playback_thread(
     let mut current: Option<(MessageId, rodio::Player)> = None;
     // The chime is decoded once; it plays on its own player so a voice note
     // keeps going underneath it.
-    let mut chime_samples: Option<(NonZero<u16>, Vec<f32>)> = None;
+    // (the file it was loaded from — `None` for the built-in one — and its samples)
+    let mut chime_sound: Option<(Option<PathBuf>, Sound)> = None;
     let mut chime: Option<rodio::Player> = None;
 
     loop {
         match commands.recv_timeout(Duration::from_millis(100)) {
-            Ok(Command::Chime) => {
+            Ok(Command::Chime { volume, file }) => {
                 if sink.is_none() {
                     match rodio::DeviceSinkBuilder::open_default_sink() {
                         Ok(mut s) => {
@@ -141,32 +197,35 @@ fn playback_thread(
                 let Some(device) = sink.as_ref() else {
                     continue;
                 };
-                if chime_samples.is_none() {
-                    match decode_ogg_opus(std::io::Cursor::new(CHIME))
-                        .ok()
-                        .and_then(|(ch, samples)| NonZero::new(ch).map(|ch| (ch, samples)))
-                    {
-                        Some(decoded) => chime_samples = Some(decoded),
-                        None => {
-                            tracing::error!("embedded chime failed to decode");
-                            continue;
-                        }
-                    }
+                if chime_sound
+                    .as_ref()
+                    .is_none_or(|(loaded, _)| *loaded != file)
+                {
+                    let custom = file.as_deref().and_then(|path| {
+                        load_sound(path)
+                            .inspect_err(|err| {
+                                tracing::warn!(?err, path = %path.display(), "cannot play the chosen notification sound; using the default");
+                            })
+                            .ok()
+                    });
+                    let Some(sound) = custom.or_else(default_chime) else {
+                        tracing::error!("embedded chime failed to decode");
+                        continue;
+                    };
+                    chime_sound = Some((file, sound));
                 }
-                let Some((channels, samples)) = chime_samples.as_ref() else {
-                    continue;
-                };
-                let Some(rate) = NonZero::new(OPUS_RATE) else {
+                let Some((_, sound)) = chime_sound.as_ref() else {
                     continue;
                 };
                 if let Some(old) = chime.take() {
                     old.stop();
                 }
                 let player = rodio::Player::connect_new(device.mixer());
+                player.set_volume(volume.clamp(0.0, 1.0));
                 player.append(rodio::buffer::SamplesBuffer::new(
-                    *channels,
-                    rate,
-                    samples.clone(),
+                    sound.channels,
+                    sound.rate,
+                    sound.samples.clone(),
                 ));
                 player.play();
                 chime = Some(player);
@@ -289,6 +348,52 @@ pub fn decode_ogg_opus<R: Read + Seek>(reader: R) -> anyhow::Result<(u16, Vec<f3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal 16-bit PCM WAV file with `frames` frames of silence-ish data.
+    fn wav(channels: u16, rate: u32, frames: u32) -> Vec<u8> {
+        let data_len = frames * u32::from(channels) * 2;
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data_len).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&channels.to_le_bytes());
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * u32::from(channels) * 2).to_le_bytes());
+        out.extend_from_slice(&(channels * 2).to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data_len.to_le_bytes());
+        for i in 0..frames * u32::from(channels) {
+            out.extend_from_slice(&((i % 100) as i16 * 50).to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn custom_sounds_load_and_long_ones_are_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = dir.path().join("ding.wav");
+        std::fs::write(&short, wav(2, 44_100, 4_410)).unwrap();
+        let sound = load_sound(&short).unwrap();
+        assert_eq!(sound.channels.get(), 2);
+        assert_eq!(sound.rate.get(), 44_100);
+        assert_eq!(sound.samples.len(), 8_820);
+
+        let long = dir.path().join("song.wav");
+        std::fs::write(&long, wav(1, 8_000, 8_000 * 12)).unwrap();
+        assert_eq!(
+            load_sound(&long).unwrap().samples.len(),
+            8_000 * MAX_SOUND_SECS
+        );
+
+        let junk = dir.path().join("notes.txt");
+        std::fs::write(&junk, b"not audio at all").unwrap();
+        assert!(load_sound(&junk).is_err());
+        assert!(load_sound(&dir.path().join("missing.ogg")).is_err());
+        assert!(default_chime().is_some());
+    }
 
     fn opus_head(channels: u8, pre_skip: u16) -> Vec<u8> {
         let mut head = b"OpusHead".to_vec();

@@ -174,6 +174,9 @@ pub enum MessageContent {
     Video {
         caption: Option<String>,
         media: MediaRef,
+        /// A short silent clip that loops like a GIF.
+        #[serde(default)]
+        gif: bool,
     },
     Document {
         file_name: String,
@@ -197,6 +200,9 @@ impl MessageContent {
                 voice_note: true, ..
             } => "🎤 Voice message".to_owned(),
             Self::Audio { .. } => "🎵 Audio".to_owned(),
+            Self::Video {
+                caption, gif: true, ..
+            } => with_caption("GIF", caption),
             Self::Video { caption, .. } => with_caption("🎥 Video", caption),
             Self::Document { file_name, .. } => format!("📄 {file_name}"),
             Self::Unsupported { .. } => "Unsupported message".to_owned(),
