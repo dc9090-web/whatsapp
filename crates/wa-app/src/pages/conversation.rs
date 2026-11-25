@@ -19,6 +19,11 @@ use crate::widgets::bubble::{self, BubbleCtx};
 use crate::widgets::media::Thumb;
 use crate::widgets::{self, reactions};
 
+/// Width of the conversation's scrollbar, and the grabbable space either
+/// side of it.
+const SCROLLBAR_WIDTH: f32 = 12.0;
+const SCROLLBAR_MARGIN: f32 = 5.0;
+
 /// Messages loaded per page.
 pub const PAGE_SIZE: usize = 50;
 /// Load older messages when scrolled within this many pixels of the top.
@@ -455,7 +460,18 @@ fn messages<'a>(app: &'a App, conv: &'a Conversation) -> Element<'a, Message> {
         prev = Some(msg);
     }
 
+    // A wider scrollbar than the default 8 px, set in from the window edge
+    // (where the pointer turns into the resize handle): the margin counts
+    // towards the area that grabs it.
+    let scrollbar = cosmic::iced::widget::scrollable::Scrollbar::new()
+        .width(SCROLLBAR_WIDTH)
+        .scroller_width(SCROLLBAR_WIDTH)
+        .margin(SCROLLBAR_MARGIN)
+        .padding(8);
     widget::scrollable(column)
+        .direction(cosmic::iced::widget::scrollable::Direction::Vertical(
+            scrollbar,
+        ))
         .id(scroll_id())
         .anchor_bottom()
         .on_scroll(|viewport| Message::ConversationScrolled(viewport.absolute_offset_reversed().y))
