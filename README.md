@@ -11,9 +11,16 @@ desktop, written in Rust with [libcosmic](https://github.com/pop-os/libcosmic).
 It pairs with your phone as a *linked device* (the same mechanism as WhatsApp
 Web) using the [`whatsapp-rust`](https://crates.io/crates/whatsapp-rust)
 protocol library, so there is no browser, no Electron and no web view: just a
-single binary that follows your COSMIC theme and accent colour.
+single binary, in a Tokyo Night look by default or following your COSMIC theme
+and accent colour.
 
 ![WhatsApp for COSMIC in demo mode](docs/screenshots/fake-mode.png)
+
+| Emoji panel | GIFs and voice messages | Settings |
+|---|---|---|
+| ![Emoji panel](docs/screenshots/emoji-panel.png) | ![A GIF and a voice message](docs/screenshots/gif-and-voice.png) | ![Settings](docs/screenshots/settings.png) |
+
+All screenshots are of the built-in demo mode (`--fake`), not a real account.
 
 > **Disclaimer.** This project is not affiliated with, authorised or endorsed by
 > WhatsApp or Meta. Unofficial clients violate the WhatsApp Terms of Service and
@@ -23,36 +30,45 @@ single binary that follows your COSMIC theme and accent colour.
 
 ### 💬 Messaging
 - 🔗 **Linked-device pairing** — scan a QR code once; the session survives restarts and reconnects on its own after network drops
-- 👤 **Chat list** for direct chats and groups, with profile pictures, unread counts, mute state and the last message preview
+- 👤 **Chat list** for direct chats and groups, with profile pictures, unread badges, pin and mute icons, read ticks and the last message preview
+- 🏷️ **Filters** — All, Unread, Groups and Favourites chips above the list; pin a chat to the top or add it to your favourites from its right-click menu (both are kept on this computer only)
+- ➕ **New chat** — start a chat with someone from your list or by phone number
 - 🧵 **Conversations** with quoted replies, group sender names, date separators and infinite scroll-back through local history
 - ✈️ **Send text** (with replies) — optimistic sending with clear status icons: 🕓 sending → ✓ sent → ✓✓ delivered → ✓✓ read, plus retry when a send fails
+- 😀 **Emoji panel** in the composer — about 400 emoji by category; it stays open so you can pick several
 - ❤️ **Reactions** — see everyone's, add your own from a quick bar or the full emoji picker, remove them again
-- 👀 **Read receipts** are sent when you open a chat; reading on your phone clears the unread count here too
+- 👀 **Read receipts** are sent when you open a chat; what you read or answer on your phone stops counting as unread here, and only messages that arrived after that keep their badge
+- 🟢 **Online, last seen and typing** under the name in the conversation header. As with WhatsApp Web, you appear online yourself while the window is focused (WhatsApp only shares other people's status with clients that are online)
+- ℹ️ **Contact details** panel for direct chats: picture, number, last seen, pin/favourite, call, search, delete
 - 📞 **Voice calls** — answer incoming calls (Accept/Decline banner, ringtone, notification) or place one from a chat's header; mute and hang up, with a call timer. Audio runs through the library's end-to-end-encrypted VoIP engine; your microphone and speaker are driven through cpal (ALSA/PipeWire). Video calls are not supported: an incoming video call is answered as voice only.
 - 📸 **Status updates** — a Status page shows your contacts' updates from the last 24 hours grouped by person (text, photos, videos) and lets you post your own text, photo or video status
 - 👥 **Groups** — create a group from your chats or by phone number; a group-info panel shows members and roles, and lets admins rename, set the description, add, remove, promote and demote; anyone can copy the invite link or leave
-- 🔍 **Search** chats by name and messages by text, caption or file name (Ctrl+F); a result opens the chat and outlines the message
+- 🔍 **Search** chats by name and messages by text, caption or file name (Ctrl+K or Ctrl+F); a result opens the chat and outlines the message
+- 🔎 **Search in a chat** — the magnifier in the conversation header steps through the matches in that chat
 - 🗑️ **Delete** messages from the right-click menu — for you (synced to your phone) or, for your own messages, for everyone — and delete whole chats from the chat list
 
 ### 🖼️ Media
 - 📷 **Images and stickers** inline (small previews first, full image fetched automatically), with a full-size viewer
 - 🎙️ **Voice notes and audio** with in-app playback (OGG/Opus)
+- 🎤 **Record voice messages** — the microphone button records from your default input; send or discard
+- 🎞️ **GIFs** — search [GIPHY](https://giphy.com) from the composer (needs your own free API key, see below) and send the one you pick; GIFs, yours and other people's, show as a picture that plays in place when clicked (needs `ffmpeg`)
 - 📄 **Documents and videos** with download and open
 - ⬇️ **Save to Downloads** on every image, video and document, named the way WhatsApp names files (`WhatsApp Image 2026-10-27 at 2.02 PM.jpg`)
 - 📎 **Send files** — attach with the 📎 button (COSMIC file chooser) or drop files onto the window; pictures are resized and re-encoded like WhatsApp does, with an optional caption; videos, audio and documents go as they are
 
 ### 🖥️ Desktop integration
 - 🔔 **Notifications** through COSMIC's notification daemon, with the sender's picture; one per chat that updates in place; click to open the chat; previews optional
-- 🔊 **New-message chime** — a short sound on every notification, with a Settings toggle
+- 🔊 **New-message sound** — a short chime on every notification, with a Settings toggle, a volume slider and the option to use your own sound file (MP3, WAV, OGG, Opus or FLAC)
 - 🧩 **App icon** for the COSMIC app library and dock
 - 🚀 **Start at login** (optional)
 - 🛑 **Graceful shutdown** on window close, SIGTERM (logout) and SIGINT
 
 ### 🎨 Look and feel
-- 🌙 **Dark theme by default**, with Light and Match-system options
+- 🌃 **Tokyo Night by default**, with Dark, Light and Match-system options that take their colours from your COSMIC theme and accent
+- 🪟 **No title bar** — the window buttons sit in the conversation header, and both pane headers drag the window
 - 😀 **Real colour emoji** everywhere
 - 🕐 **12-hour clock** and short dates ("12 Jan 2026")
-- 🎯 **Accent-tinted** outgoing bubbles that follow your COSMIC accent colour
+- 🎯 **Accent-tinted** outgoing bubbles
 
 ### 🔒 Data
 - 🔐 **Encrypted at rest** — the message history, the session with its Signal keys and the backend's index are SQLCipher databases (AES-256). The key is a random 256-bit value kept in your desktop keyring (Secret Service, e.g. gnome-keyring), fetched silently at launch; a copied database file is useless without it, and plain `sqlite3` refuses to open one. Databases from earlier versions are encrypted in place on first start
@@ -64,12 +80,13 @@ single binary that follows your COSMIC theme and accent colour.
 Requires stable Rust (1.94 or newer), `cmake` (for the bundled Opus build), the
 Wayland development libraries (`libxkbcommon`, `wayland`), ALSA, OpenSSL (for
 the bundled SQLCipher build), a running Secret Service keyring (gnome-keyring
-or KWallet) and a colour emoji font (`noto-fonts-emoji` on Arch).
+or KWallet) and a colour emoji font (`noto-fonts-emoji` on Arch). `ffmpeg` is
+optional: with it, GIFs play in place; without it they show as a still picture.
 
 ```sh
 cargo run --release -p wa-app            # real backend: scan the QR with your phone
 cargo run --release -p wa-app -- --fake  # built-in demo backend: no network, throwaway data
-cargo test --workspace                   # 150+ unit and integration tests, no network
+cargo test --workspace                   # about 200 unit and integration tests, no network
 ```
 
 With [`just`](https://github.com/casey/just):
@@ -92,6 +109,13 @@ cd packaging && makepkg -si
 ```
 
 Builds and installs `whatsapp-cosmic-git` from this repository.
+
+### GIF search
+
+GIF search uses the GIPHY API, which needs a key of your own. Create a free
+one at [developers.giphy.com](https://developers.giphy.com) and paste it into
+Settings → GIFs. Your search words are sent to GIPHY; the key is stored with
+the app's other settings, unencrypted.
 
 ### Where things live
 
@@ -165,13 +189,18 @@ crates/
     ├── src/main.rs               args, logging, launch
     ├── src/app.rs                cosmic::Application: state, update, view, subscriptions
     ├── src/backend_sub.rs        runs wa-core as an iced Subscription
-    ├── src/config.rs             settings (appearance, previews) via cosmic-config
-    ├── src/audio.rs              voice-note playback (rodio + Opus)
+    ├── src/config.rs             settings (appearance, notifications, GIPHY key) via cosmic-config
+    ├── src/tokens.rs             the redesign's colours and sizes (Tokyo Night)
+    ├── src/style.rs              palette for the active theme and shared widget styles
+    ├── src/audio.rs              voice-note and notification-sound playback (rodio + Opus)
+    ├── src/recorder.rs           voice message recording (cpal) and Ogg/Opus encoding
+    ├── src/giphy.rs              GIPHY search and download
+    ├── src/gifplay.rs            decodes GIF clips into frames with ffmpeg
     ├── src/fonts.rs              puts the colour emoji font ahead of monochrome fallbacks
     ├── src/signals.rs            SIGTERM/SIGINT → graceful quit
     ├── src/pages/                login (QR), sync, chats (list), conversation, settings
-    └── src/widgets/              message bubble, media (images/audio/files), reactions,
-                                  avatars, icons and shared styling
+    └── src/widgets/              message bubble, media (images/GIFs/audio/files), reactions,
+                                  emoji, avatars, icons and window controls
 resources/                        .desktop, AppStream metainfo, hicolor icons (SVG + PNG)
 packaging/PKGBUILD                Arch package
 docs/superpowers/                 the design spec and implementation plan this was built from
@@ -184,9 +213,9 @@ docs/superpowers/                 the design spec and implementation plan this w
   ordering (persist before forward, optimistic send, logout wipe), protocol →
   model conversion against real protobuf messages, UI state transitions, file
   naming, and more. Nothing talks to WhatsApp servers.
-- `--fake` exercises the full UI against the demo backend: seven chats with
-  text, replies, images, a sticker, a voice note, a document, reactions, an
-  unsupported message, failed sends and profile pictures.
+- `--fake` exercises the full UI against the demo backend: nine chats with
+  text, replies, images, a sticker, a GIF, a voice note, a document, reactions,
+  an unsupported message, failed sends, long names and profile pictures.
 - Real-account behaviour is checked by hand with the list below.
 
 ### Manual end-to-end checklist (real account)
@@ -204,6 +233,11 @@ docs/superpowers/                 the design spec and implementation plan this w
 - [ ] **Voice calls:** an incoming call rings (banner + notification), Accept connects with two-way audio, Mute silences the microphone, End hangs up on both sides; an outgoing call rings the phone and connects when answered; Decline and a cancelled call clear the banner
 - [ ] **Status:** a contact's text and photo updates appear on the Status page; posting a text and a photo status shows them on the phone's Status tab
 - [ ] **Groups:** create a group (it appears on the phone); rename it, set a description, add and remove a member, make and dismiss an admin, copy the invite link; leave a group
+- [ ] **Read elsewhere:** read some of a chat's unread messages on the phone; the badge here drops to the ones that arrived after; reply from the phone and it clears
+- [ ] **Presence:** a contact's "online" / "last seen" line appears under their name while the window is focused; "typing…" shows while they type
+- [ ] **Voice message:** record one with the microphone button; it arrives on the phone as a voice message and plays
+- [ ] **GIFs:** with a GIPHY key set, search, pick and send a GIF; it loops on the phone, and a GIF received from the phone plays here when clicked
+- [ ] **Notification sound:** the volume slider changes the loudness; a custom sound file plays and Reset restores the chime
 - [ ] **Reconnect:** disable networking for a minute, re-enable; the app reconnects and catches up
 - [ ] **Remote logout:** remove the linked device on the phone; the app returns to the QR screen
 - [ ] **Log out** from the app's menu wipes the local data
@@ -214,6 +248,8 @@ docs/superpowers/                 the design spec and implementation plan this w
   heavy lifting: pairing, the Signal protocol, media encryption, history sync.
 - [libcosmic](https://github.com/pop-os/libcosmic) and
   [iced](https://github.com/iced-rs/iced) for the UI.
+- GIF search is powered by [GIPHY](https://giphy.com); the colours are
+  [Tokyo Night](https://github.com/tokyo-night/tokyo-night-vscode-theme).
 - WhatsApp and the WhatsApp logo are trademarks of WhatsApp LLC; they are used
   here only to identify the service this client connects to.
 

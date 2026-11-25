@@ -9,8 +9,9 @@
     <p>
       A native Rust client built with libcosmic. It links to your phone as a
       WhatsApp linked device by scanning a QR code, and supports chats and
-      groups, replies, reactions, images, stickers, voice notes, documents,
-      voice calls, status updates, search and desktop notifications.
+      groups, replies, reactions, emoji, images, stickers, GIFs, voice
+      messages, documents, voice calls, status updates, search and desktop
+      notifications.
     </p>
     <p>
       Your message history and session keys are stored in SQLCipher-encrypted
@@ -35,7 +36,33 @@
     <content_attribute id="social-chat">intense</content_attribute>
     <content_attribute id="social-audio">moderate</content_attribute>
   </content_rating>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Chat list and a conversation</caption>
+      <image>https://raw.githubusercontent.com/dc9090-web/whatsapp/main/docs/screenshots/fake-mode.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The emoji panel</caption>
+      <image>https://raw.githubusercontent.com/dc9090-web/whatsapp/main/docs/screenshots/emoji-panel.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Settings</caption>
+      <image>https://raw.githubusercontent.com/dc9090-web/whatsapp/main/docs/screenshots/settings.png</image>
+    </screenshot>
+  </screenshots>
   <releases>
+    <release version="0.2.0" date="2026-11-25">
+      <description>
+        <p>
+          New look (Tokyo Night by default, no title bar, chat filters), an
+          emoji panel, GIF search and in-place GIF playback, voice message
+          recording, search within a chat, contact details, online and last
+          seen, pinned and favourite chats, notification volume and custom
+          notification sounds, and better syncing of what you read on your
+          phone.
+        </p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-10-27"/>
   </releases>
   <url type="homepage">https://github.com/dc9090-web/whatsapp</url>
