@@ -8,7 +8,7 @@ arch=('x86_64')
 license=('GPL-3.0-or-later')
 # libopus is linked statically (audiopus_sys); rodio/cpal link libasound.
 depends=(gcc-libs glibc libxkbcommon wayland alsa-lib openssl noto-fonts-emoji)
-optdepends=('ffmpeg: play GIFs in place')
+optdepends=('ffmpeg: play videos and GIFs in the app')
 makedepends=(rust cargo git just cmake)
 provides=("$_pkgname")
 conflicts=("$_pkgname")
